@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Bridge/link icon: two nodes connected by arcs -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M4,6 C4,4.9 4.9,4 6,4 C7.1,4 8,4.9 8,6 C8,7.1 7.1,8 6,8 C4.9,8 4,7.1 4,6Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M16,6 C16,4.9 16.9,4 18,4 C19.1,4 20,4.9 20,6 C20,7.1 19.1,8 18,8 C16.9,8 16,7.1 16,6Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8,6 L16,6"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFFFFF" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M6,8 C6,8 6,14 12,14 C18,14 18,8 18,8"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFFFFF"
+        android:fillAlpha="0" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M10,16 C10,14.9 10.9,14 12,14 C13.1,14 14,14.9 14,16 C14,17.1 13.1,18 12,18 C10.9,18 10,17.1 10,16Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,18 L12,21"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFFFFF" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8,21 L16,21"
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFFFFF" />
+</vector>

@@ -1,0 +1,10 @@
+// RTAK Bridge - Top-level build file
+//
+// Repositories are declared centrally in settings.gradle
+// (repositoriesMode = FAIL_ON_PROJECT_REPOS) so they must NOT
+// appear here or in allprojects{}.
+
+plugins {
+    id 'com.android.application' version '8.2.2' apply false
+    id 'com.chaquo.python'       version '16.0.0' apply false
+}

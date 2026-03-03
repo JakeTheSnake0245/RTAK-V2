@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory app:title="TAK Server">
+        <EditTextPreference
+            app:key="tak_port"
+            app:title="TCP Port"
+            app:summary="Port for ATAK client connections (default: 8087)"
+            app:defaultValue="8087" />
+
+        <SwitchPreferenceCompat
+            app:key="tak_auto_start"
+            app:title="Auto-start on boot"
+            app:summary="Start the bridge service when the app launches"
+            app:defaultValue="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Reticulum">
+        <SwitchPreferenceCompat
+            app:key="rns_transport"
+            app:title="Enable Transport"
+            app:summary="Act as a Reticulum transport node (route for others)"
+            app:defaultValue="true" />
+
+        <SwitchPreferenceCompat
+            app:key="rns_auto_announce"
+            app:title="Auto-announce"
+            app:summary="Periodically announce this node on the network"
+            app:defaultValue="true" />
+
+        <EditTextPreference
+            app:key="rns_announce_interval"
+            app:title="Announce interval (seconds)"
+            app:summary="How often to send announces (0 = manual only)"
+            app:defaultValue="300" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Identity">
+        <Preference
+            app:key="identity_info"
+            app:title="Node Identity"
+            app:summary="View your Reticulum identity and destination hash"
+            app:selectable="false" />
+    </PreferenceCategory>
+
+    <PreferenceCategory app:title="Debug">
+        <SwitchPreferenceCompat
+            app:key="debug_verbose"
+            app:title="Verbose logging"
+            app:summary="Show detailed Reticulum debug output"
+            app:defaultValue="false" />
+    </PreferenceCategory>
+</PreferenceScreen>
