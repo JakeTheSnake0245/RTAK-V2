@@ -1,4 +1,4 @@
-# RTAK Bridge
+# RTAK V2
 
 **Android TAK ↔ Reticulum Network Stack Bridge**
 
@@ -134,7 +134,7 @@ ATAK will connect and begin exchanging CoT events through the bridge.
 The default config enables `AutoInterface` for local peer discovery. To add additional interfaces (RNode LoRa, TCP, etc.), edit the Reticulum config file at:
 
 ```
-/data/data/com.rtak.bridge/files/reticulum/config
+/data/data/com.caai.rtak/files/reticulum/config
 ```
 
 Or modify the default config template in `rtak_bridge.py`.

@@ -16,5 +16,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "RTAK Bridge"
+rootProject.name = "RTAK V2"
 include ':app'

@@ -4,11 +4,11 @@ plugins {
 }
 
 android {
-    namespace 'com.rtak.bridge'
+    namespace 'com.caai.rtak'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.rtak.bridge"
+        applicationId "com.caai.rtak"
         minSdk 24
         targetSdk 34
         versionCode 1
