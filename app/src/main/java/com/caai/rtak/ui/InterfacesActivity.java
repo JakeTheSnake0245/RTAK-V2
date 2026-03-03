@@ -1,4 +1,4 @@
-package com.rtak.bridge.ui;
+package com.caai.rtak.ui;
 
 import android.content.ComponentName;
 import android.content.Context;
@@ -27,8 +27,8 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
-import com.rtak.bridge.R;
-import com.rtak.bridge.service.TakBridgeService;
+import com.caai.rtak.R;
+import com.caai.rtak.service.TakBridgeService;
 
 import org.json.JSONArray;
 import org.json.JSONObject;

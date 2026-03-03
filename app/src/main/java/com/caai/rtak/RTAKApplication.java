@@ -1,4 +1,4 @@
-package com.rtak.bridge;
+package com.caai.rtak;
 
 import android.app.Application;
 import android.app.NotificationChannel;

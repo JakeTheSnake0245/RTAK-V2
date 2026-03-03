@@ -1,11 +1,11 @@
-package com.rtak.bridge.ui;
+package com.caai.rtak.ui;
 
 import android.os.Bundle;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.preference.PreferenceFragmentCompat;
 
-import com.rtak.bridge.R;
+import com.caai.rtak.R;
 
 /**
  * Settings screen for configuring TAK server port, Reticulum interfaces,

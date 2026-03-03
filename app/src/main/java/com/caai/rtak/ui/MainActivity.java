@@ -1,4 +1,4 @@
-package com.rtak.bridge.ui;
+package com.caai.rtak.ui;
 
 import android.Manifest;
 import android.content.ComponentName;
@@ -30,9 +30,9 @@ import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.rtak.bridge.R;
-import com.rtak.bridge.model.BridgeStatus;
-import com.rtak.bridge.service.TakBridgeService;
+import com.caai.rtak.R;
+import com.caai.rtak.model.BridgeStatus;
+import com.caai.rtak.service.TakBridgeService;
 
 import org.json.JSONArray;
 import org.json.JSONObject;

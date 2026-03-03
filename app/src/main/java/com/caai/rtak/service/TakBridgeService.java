@@ -1,4 +1,4 @@
-package com.rtak.bridge.service;
+package com.caai.rtak.service;
 
 import android.app.Notification;
 import android.app.PendingIntent;
@@ -23,12 +23,12 @@ import androidx.lifecycle.MutableLiveData;
 
 import org.json.JSONObject;
 
-import com.rtak.bridge.R;
-import com.rtak.bridge.RTAKApplication;
-import com.rtak.bridge.RTAKCallback;
-import com.rtak.bridge.ReticulumBridge;
-import com.rtak.bridge.model.BridgeStatus;
-import com.rtak.bridge.ui.MainActivity;
+import com.caai.rtak.R;
+import com.caai.rtak.RTAKApplication;
+import com.caai.rtak.RTAKCallback;
+import com.caai.rtak.ReticulumBridge;
+import com.caai.rtak.model.BridgeStatus;
+import com.caai.rtak.ui.MainActivity;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -54,7 +54,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private static final int TAK_PORT = 8087;
 
     static final String ACTION_USB_PERMISSION =
-            "com.rtak.bridge.USB_PERMISSION";
+            "com.caai.rtak.USB_PERMISSION";
 
     // ── Public observable state ─────────────────────────────────────────
     public static final MutableLiveData<BridgeStatus> statusLive =

@@ -1,4 +1,4 @@
-package com.rtak.bridge.model;
+package com.caai.rtak.model;
 
 /**
  * Holds the observable state of the RTAK Bridge for UI display.
