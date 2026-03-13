@@ -21,6 +21,7 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import androidx.lifecycle.MutableLiveData;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import com.caai.rtak.R;
@@ -30,6 +31,8 @@ import com.caai.rtak.ReticulumBridge;
 import com.caai.rtak.model.BridgeStatus;
 import com.caai.rtak.ui.MainActivity;
 
+import java.io.File;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -84,6 +87,10 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private int cotToTak = 0;
     private int cotToRns = 0;
 
+    // ── SA Cache (for fast pairing) ─────────────────────────────────────
+    private final ConcurrentHashMap<String, String> localSaCache  = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> remoteSaCache = new ConcurrentHashMap<>();
+
     // ── Heartbeat ────────────────────────────────────────────────────────
     private static final long HEARTBEAT_INTERVAL_MS = 10_000; // 10 seconds — must be below ATAK's data-reception timeout
     private ScheduledExecutorService heartbeatScheduler;
@@ -128,9 +135,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
 
         unregisterUsbReceiver();
         if (heartbeatScheduler != null) heartbeatScheduler.shutdownNow();
-        bgExecutor.shutdownNow();
         if (tcpServer != null) tcpServer.stop();
         if (bridge != null) bridge.shutdown();
+        bgExecutor.shutdownNow();
         releaseWakeLock();
 
         updateStatus(status -> {
@@ -202,6 +209,12 @@ public class TakBridgeService extends Service implements RTAKCallback,
         cotFromRns++;
         postLog("← RNS CoT from " + shortenHash(senderHash));
 
+        // Cache SA events for fast replay to new ATAK clients
+        if (isSaEvent(cotXml)) {
+            String uid = extractCotUid(cotXml);
+            if (uid != null) remoteSaCache.put(uid, cotXml);
+        }
+
         // Forward to all connected TAK clients
         if (tcpServer != null) {
             tcpServer.broadcastToClients(cotXml);
@@ -215,6 +228,16 @@ public class TakBridgeService extends Service implements RTAKCallback,
     public void onPeerConnected(String peerHash) {
         postLog("RNS peer connected: " + shortenHash(peerHash));
         updateStatus(s -> s.rnsPeers++);
+
+        // Send cached ATAK positions so remote peer sees us immediately
+        if (bridge != null && !localSaCache.isEmpty()) {
+            bgExecutor.submit(() -> {
+                for (String sa : localSaCache.values()) {
+                    bridge.sendCot(sa, peerHash);
+                }
+                postLog("Sent " + localSaCache.size() + " cached SA(s) to new peer");
+            });
+        }
     }
 
     @Override
@@ -257,6 +280,17 @@ public class TakBridgeService extends Service implements RTAKCallback,
 
         postLog("→ TAK CoT from " + clientId);
 
+        // Cache SA events for fast replay to new RNS peers
+        if (isSaEvent(cotXml)) {
+            String uid = extractCotUid(cotXml);
+            if (uid != null) localSaCache.put(uid, cotXml);
+        }
+
+        // Echo to all TAK clients (TAK server relay behavior)
+        if (tcpServer != null) {
+            tcpServer.broadcastToClients(cotXml);
+        }
+
         // Forward to all Reticulum peers
         if (bridge != null && bridge.isInitialised()) {
             bgExecutor.submit(() -> {
@@ -282,6 +316,14 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 tcpServer.sendToClient(clientId, ping);
             }
         }
+
+        // Send cached RNS peer positions so ATAK sees peers immediately
+        if (!remoteSaCache.isEmpty()) {
+            for (String sa : remoteSaCache.values()) {
+                tcpServer.sendToClient(clientId, sa);
+            }
+            postLog("Sent " + remoteSaCache.size() + " cached SA(s) to new client");
+        }
     }
 
     @Override
@@ -291,6 +333,44 @@ public class TakBridgeService extends Service implements RTAKCallback,
     }
 
     // ── Public API ──────────────────────────────────────────────────────
+
+    /**
+     * Stop only the Python bridge (TCP server + RNS) while keeping the
+     * Android foreground service alive.  Runs on the background executor
+     * so it never blocks the main thread.
+     */
+    public void stopBridgeAsync() {
+        bgExecutor.submit(() -> {
+            if (heartbeatScheduler != null) {
+                heartbeatScheduler.shutdownNow();
+                heartbeatScheduler = null;
+            }
+            if (tcpServer != null) {
+                tcpServer.stop();
+                tcpServer = null;
+            }
+            if (bridge != null) {
+                bridge.stopBridge();
+                bridge = null;
+            }
+            updateStatus(s -> {
+                s.bridgeState = "STOPPED";
+                s.takServerRunning = false;
+                s.takClients = 0;
+                s.rnsPeers = 0;
+            });
+            updateNotification("Stopped — tap Start Bridge to reconnect");
+        });
+    }
+
+    /**
+     * (Re)start the bridge after it has been stopped via {@link #stopBridgeAsync()}.
+     * Safe to call even if the bridge is already running — guarded internally.
+     */
+    public void restartBridge() {
+        if (bridge != null) return; // already running
+        startBridge();
+    }
 
     /**
      * Send an announce on the Reticulum network.
@@ -330,25 +410,43 @@ public class TakBridgeService extends Service implements RTAKCallback,
      * @param pid         USB Product ID (pass 0 if not applicable).
      */
     public void addInterface(String configJson, int vid, int pid) {
-        if (bridge == null) return;
-        bgExecutor.submit(() -> {
-            // Inject vid/pid into config JSON so the Python registry can store them
-            String enriched = configJson;
-            if (vid != 0 && pid != 0) {
-                // Append vid/pid before closing brace
-                enriched = configJson.trim();
-                if (enriched.endsWith("}")) {
-                    enriched = enriched.substring(0, enriched.length() - 1)
-                            + ",\"vid\":" + vid + ",\"pid\":" + pid + "}";
+        if (bridge != null && bridge.isInitialised()) {
+            // Bridge is running — add live into RNS Transport
+            bgExecutor.submit(() -> {
+                // Inject vid/pid into config JSON so the Python registry can store them
+                String enriched = configJson;
+                if (vid != 0 && pid != 0) {
+                    enriched = configJson.trim();
+                    if (enriched.endsWith("}")) {
+                        enriched = enriched.substring(0, enriched.length() - 1)
+                                + ",\"vid\":" + vid + ",\"pid\":" + pid + "}";
+                    }
                 }
-            }
-            String name = bridge.addInterface(enriched);
-            if (name != null) {
-                postLog("Interface added: " + name);
-            } else {
-                postLog("ERROR: Failed to add interface");
-            }
-        });
+                String name = bridge.addInterface(enriched);
+                if (name != null) {
+                    postLog("Interface added: " + name);
+                } else {
+                    postLog("ERROR: Failed to add interface");
+                    mainHandler.post(() -> android.widget.Toast.makeText(this,
+                            "Failed to add interface — check port and settings",
+                            android.widget.Toast.LENGTH_LONG).show());
+                }
+            });
+        } else {
+            // Bridge not running — persist to registry; Python loads it on next start
+            bgExecutor.submit(() -> {
+                String name = writeToRegistry(configJson, vid, pid);
+                if (name != null) {
+                    postLog("Interface saved: " + name + " (will connect when bridge starts)");
+                    mainHandler.post(() -> interfaceEventLive.setValue(new String[]{name, "ADDED"}));
+                } else {
+                    postLog("ERROR: Failed to save interface to registry");
+                    mainHandler.post(() -> android.widget.Toast.makeText(this,
+                            "Failed to save interface",
+                            android.widget.Toast.LENGTH_LONG).show());
+                }
+            });
+        }
     }
 
     /**
@@ -368,8 +466,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
      * Runs synchronously on the calling thread — call from a background thread.
      */
     public String listInterfacesJson() {
-        if (bridge == null) return "[]";
-        return bridge.listInterfacesJson();
+        if (bridge != null) return bridge.listInterfacesJson();
+        // Bridge not running — read persisted registry so the UI still shows saved interfaces
+        return readRegistryJson();
     }
 
     /**
@@ -407,6 +506,114 @@ public class TakBridgeService extends Service implements RTAKCallback,
             postLog(ok ? "Interface " + (enabled ? "enabled" : "disabled") + ": " + name
                        : "ERROR: Failed to " + (enabled ? "enable" : "disable") + ": " + name);
         });
+    }
+
+    // ── Pre-bridge interface registry helpers ────────────────────────────
+    // Used when the bridge is not yet running to read/write rtak_interfaces.json
+    // directly, matching the format Python's _save/_load_interface_registry uses.
+
+    private File getRegistryFile() {
+        return new File(getFilesDir(), "reticulum/rtak_interfaces.json");
+    }
+
+    /**
+     * Read rtak_interfaces.json and return a JSON array in the same format as
+     * bridge.listInterfacesJson() so the UI can display saved-but-not-live interfaces.
+     */
+    private String readRegistryJson() {
+        File f = getRegistryFile();
+        if (!f.exists()) return "[]";
+        try {
+            StringBuilder sb = new StringBuilder();
+            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(f))) {
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+            }
+            JSONArray registry = new JSONArray(sb.toString());
+            JSONArray result   = new JSONArray();
+            for (int i = 0; i < registry.length(); i++) {
+                JSONObject rec   = registry.getJSONObject(i);
+                JSONObject entry = new JSONObject();
+                entry.put("name",         rec.optString("name"));
+                entry.put("type",         rec.optString("type"));
+                entry.put("online",       false);
+                entry.put("rx_bytes",     0);
+                entry.put("tx_bytes",     0);
+                entry.put("managed",      true);
+                entry.put("enabled",      rec.optBoolean("enabled", true));
+                entry.put("disconnected", false);
+                if (rec.has("vid")) entry.put("vid", rec.get("vid"));
+                if (rec.has("pid")) entry.put("pid", rec.get("pid"));
+                entry.put("config",       rec.optJSONObject("config"));
+                result.put(entry);
+            }
+            return result.toString();
+        } catch (Exception e) {
+            Log.w(TAG, "readRegistryJson: " + e.getMessage());
+            return "[]";
+        }
+    }
+
+    /**
+     * Append a new interface record to rtak_interfaces.json without requiring the
+     * bridge to be running.  Matches the schema Python's _save_interface_registry writes.
+     *
+     * @return The interface name on success, or null on failure / duplicate.
+     */
+    private String writeToRegistry(String configJson, int vid, int pid) {
+        try {
+            JSONObject config = new JSONObject(configJson);
+            String name = config.optString("name", "").trim();
+            String type = config.optString("type", "").trim();
+            if (name.isEmpty() || type.isEmpty()) return null;
+
+            // Build the "config" sub-object (strip top-level metadata fields)
+            JSONObject cfg = new JSONObject(configJson);
+            cfg.remove("name");
+            cfg.remove("type");
+            cfg.remove("enabled");
+            cfg.remove("vid");
+            cfg.remove("pid");
+
+            JSONObject record = new JSONObject();
+            record.put("name",    name);
+            record.put("type",    type);
+            record.put("enabled", true);
+            record.put("config",  cfg);
+            if (vid != 0) record.put("vid", vid);
+            if (pid != 0) record.put("pid", pid);
+
+            File f = getRegistryFile();
+            //noinspection ResultOfMethodCallIgnored
+            f.getParentFile().mkdirs();
+
+            // Load existing records; reject duplicates
+            JSONArray registry = new JSONArray();
+            if (f.exists()) {
+                StringBuilder sb = new StringBuilder();
+                try (java.io.BufferedReader br =
+                             new java.io.BufferedReader(new java.io.FileReader(f))) {
+                    String line;
+                    while ((line = br.readLine()) != null) sb.append(line);
+                }
+                registry = new JSONArray(sb.toString());
+                for (int i = 0; i < registry.length(); i++) {
+                    if (name.equals(registry.getJSONObject(i).optString("name"))) {
+                        Log.w(TAG, "writeToRegistry: '" + name + "' already exists");
+                        return null;
+                    }
+                }
+            }
+
+            registry.put(record);
+            try (java.io.FileWriter fw = new java.io.FileWriter(f)) {
+                fw.write(registry.toString(2));
+            }
+            return name;
+        } catch (Exception e) {
+            Log.e(TAG, "writeToRegistry failed", e);
+            return null;
+        }
     }
 
     // ── Remembered RNode Settings ────────────────────────────────────────
@@ -702,5 +909,17 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private static String shortenHash(String hash) {
         if (hash == null || hash.isEmpty()) return "unknown";
         return hash.length() > 16 ? hash.substring(0, 16) + "…" : hash;
+    }
+
+    private static boolean isSaEvent(String cotXml) {
+        return cotXml.contains("type=\"a-");
+    }
+
+    private static String extractCotUid(String cotXml) {
+        int i = cotXml.indexOf("uid=\"");
+        if (i < 0) return null;
+        int start = i + 5;
+        int end = cotXml.indexOf('"', start);
+        return (end > start) ? cotXml.substring(start, end) : null;
     }
 }

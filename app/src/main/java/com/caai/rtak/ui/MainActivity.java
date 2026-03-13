@@ -284,15 +284,18 @@ public class MainActivity extends AppCompatActivity {
     // ── Service Control ────────────────────────────────────────────────
 
     private void toggleService() {
-        if (isBound) {
-            // Stop
-            unbindService(serviceConnection);
-            isBound = false;
-            stopService(new Intent(this, TakBridgeService.class));
-            btnStartStop.setText("Start Bridge");
-            boundService = null;
+        if (isBound && boundService != null) {
+            if ("RUNNING".equals(lastBridgeState) || "STARTING".equals(lastBridgeState)) {
+                // Bridge is running — stop just the bridge, keep the service alive
+                boundService.stopBridgeAsync();
+                btnStartStop.setText("Start Bridge");
+            } else {
+                // Service is bound but bridge is stopped — restart the bridge
+                boundService.restartBridge();
+                btnStartStop.setText("Stop Bridge");
+            }
         } else {
-            // Start
+            // Service not running yet — start it (which also starts the bridge)
             Intent intent = new Intent(this, TakBridgeService.class);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent);
@@ -354,6 +357,11 @@ public class MainActivity extends AppCompatActivity {
             tvLog.setText("");
             return true;
         } else if (item.getItemId() == R.id.action_close_app) {
+            if (isBound) {
+                unbindService(serviceConnection);
+                isBound = false;
+            }
+            stopService(new Intent(this, TakBridgeService.class));
             finishAndRemoveTask();
             return true;
         }

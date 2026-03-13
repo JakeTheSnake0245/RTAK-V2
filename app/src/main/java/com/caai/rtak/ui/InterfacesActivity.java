@@ -1,10 +1,12 @@
 package com.caai.rtak.ui;
 
+import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.graphics.Color;
+import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.text.InputType;
@@ -12,6 +14,7 @@ import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
+import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
@@ -27,7 +30,10 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.caai.rtak.R;
+import com.caai.rtak.rnode.RNodeIdentifier;
 import com.caai.rtak.service.TakBridgeService;
 
 import org.json.JSONArray;
@@ -45,6 +51,7 @@ import java.util.concurrent.Executors;
 public class InterfacesActivity extends AppCompatActivity {
 
     private static final String TAG = "InterfacesActivity";
+    private static final String ACTION_USB_PERMISSION = "com.caai.rtak.USB_PERMISSION_INTERFACES";
 
     private RecyclerView rvInterfaces;
     private FloatingActionButton fabAdd;
@@ -236,13 +243,12 @@ public class InterfacesActivity extends AppCompatActivity {
                 addField(form, fieldKeys, fieldViews, "listen_port", "Listen Port","4242");
                 break;
             case "RNodeInterface":
-                String defaultPort = usbPath.isEmpty() ? "" : usbPath;
-                addField(form, fieldKeys, fieldViews, "port",          "Port / BLE name", defaultPort);
-                addField(form, fieldKeys, fieldViews, "frequency",     "Frequency (Hz)",  "915000000");
-                addField(form, fieldKeys, fieldViews, "bandwidth",     "Bandwidth (Hz)",  "125000");
-                addField(form, fieldKeys, fieldViews, "txpower",       "TX Power (dBm)",  "7");
-                addField(form, fieldKeys, fieldViews, "spreadingfactor","Spreading Factor","8");
-                addField(form, fieldKeys, fieldViews, "codingrate",    "Coding Rate",     "5");
+                addRNodePortField(form, fieldKeys, fieldViews, usbPath);
+                addField(form, fieldKeys, fieldViews, "frequency",      "Frequency (Hz)",  "915000000", InputType.TYPE_CLASS_NUMBER);
+                addField(form, fieldKeys, fieldViews, "bandwidth",      "Bandwidth (Hz)",  "125000",    InputType.TYPE_CLASS_NUMBER);
+                addField(form, fieldKeys, fieldViews, "txpower",        "TX Power (dBm)",  "7",         InputType.TYPE_CLASS_NUMBER);
+                addField(form, fieldKeys, fieldViews, "spreadingfactor","Spreading Factor","8",         InputType.TYPE_CLASS_NUMBER);
+                addField(form, fieldKeys, fieldViews, "codingrate",     "Coding Rate",     "5",         InputType.TYPE_CLASS_NUMBER);
                 break;
             case "SerialInterface":
                 addField(form, fieldKeys, fieldViews, "port",  "Serial Port", usbPath.isEmpty() ? "/dev/ttyUSB0" : usbPath);
@@ -285,14 +291,145 @@ public class InterfacesActivity extends AppCompatActivity {
     }
 
     private void addField(LinearLayout parent, List<String> keys, List<EditText> views,
-                           String key, String hint, String defaultValue) {
+                           String key, String label, String defaultValue) {
+        addField(parent, keys, views, key, label, defaultValue, InputType.TYPE_CLASS_TEXT);
+    }
+
+    private void addField(LinearLayout parent, List<String> keys, List<EditText> views,
+                           String key, String label, String defaultValue, int inputType) {
+        int dpTopMargin = (int) (8 * getResources().getDisplayMetrics().density);
+
+        TextView tv = new TextView(this);
+        tv.setText(label);
+        tv.setTextSize(12f);
+        tv.setAlpha(0.7f);
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelLp.topMargin = dpTopMargin;
+        tv.setLayoutParams(labelLp);
+        parent.addView(tv);
+
         EditText et = new EditText(this);
-        et.setHint(hint);
+        et.setHint(label);
         et.setText(defaultValue);
-        et.setInputType(InputType.TYPE_CLASS_TEXT);
+        et.setInputType(inputType);
         parent.addView(et);
         keys.add(key);
         views.add(et);
+    }
+
+    /**
+     * Adds the "Port / BLE name" row for RNodeInterface, including a "Scan USB" button
+     * that enumerates connected USB serial devices and auto-fills the port path.
+     */
+    private void addRNodePortField(LinearLayout parent, List<String> keys, List<EditText> views,
+                                    String defaultPort) {
+        int dpTopMargin = (int) (8 * getResources().getDisplayMetrics().density);
+
+        TextView tv = new TextView(this);
+        tv.setText("Port / BLE name");
+        tv.setTextSize(12f);
+        tv.setAlpha(0.7f);
+        LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelLp.topMargin = dpTopMargin;
+        tv.setLayoutParams(labelLp);
+        parent.addView(tv);
+
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+
+        EditText et = new EditText(this);
+        et.setHint("/dev/bus/usb/... or BLE name");
+        et.setText(defaultPort);
+        et.setInputType(InputType.TYPE_CLASS_TEXT);
+        LinearLayout.LayoutParams etLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        et.setLayoutParams(etLp);
+        row.addView(et);
+
+        Button scanBtn = new Button(this);
+        scanBtn.setText("Scan USB");
+        scanBtn.setOnClickListener(v -> scanForRNodes(et, scanBtn));
+        row.addView(scanBtn);
+
+        parent.addView(row);
+        keys.add("port");
+        views.add(et);
+    }
+
+    /**
+     * Probes connected USB serial devices with the RNode KISS protocol and
+     * populates portField with the confirmed device path.
+     *
+     * On the first tap, any devices that still need USB permission are requested;
+     * the user grants them in the system dialog and taps Scan again.
+     * On subsequent taps (permissions granted), the KISS probe runs on bgExecutor.
+     */
+    private void scanForRNodes(EditText portField, Button scanBtn) {
+        UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+        List<UsbSerialDriver> drivers =
+                UsbSerialProber.getDefaultProber().findAllDrivers(usbManager);
+
+        if (drivers.isEmpty()) {
+            Toast.makeText(this, "No USB serial devices connected", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        // Request permission for any device that doesn't have it yet
+        boolean permissionRequested = false;
+        for (UsbSerialDriver driver : drivers) {
+            if (!usbManager.hasPermission(driver.getDevice())) {
+                PendingIntent pi = PendingIntent.getBroadcast(
+                        this, 0,
+                        new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()),
+                        PendingIntent.FLAG_MUTABLE);
+                usbManager.requestPermission(driver.getDevice(), pi);
+                permissionRequested = true;
+            }
+        }
+
+        if (permissionRequested) {
+            Toast.makeText(this,
+                    "USB permission needed — grant it in the dialog, then tap Scan again",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        // All devices have permission — run the KISS probe
+        scanBtn.setEnabled(false);
+        Toast.makeText(this, "Scanning for RNodes…", Toast.LENGTH_SHORT).show();
+
+        bgExecutor.submit(() -> {
+            List<RNodeIdentifier.RNodeInfo> found =
+                    new RNodeIdentifier().discoverRNodes(InterfacesActivity.this);
+            runOnUiThread(() -> {
+                scanBtn.setEnabled(true);
+                if (found.isEmpty()) {
+                    Toast.makeText(this, "No RNodes found", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                if (found.size() == 1) {
+                    portField.setText(found.get(0).devicePath);
+                    Toast.makeText(this,
+                            "RNode confirmed: " + found.get(0).devicePath
+                                    + "  [" + found.get(0).mcuName() + "]",
+                            Toast.LENGTH_LONG).show();
+                    return;
+                }
+                // Multiple confirmed RNodes — let the user pick
+                String[] labels = new String[found.size()];
+                for (int i = 0; i < found.size(); i++) {
+                    labels[i] = found.get(i).toString();
+                }
+                new AlertDialog.Builder(this)
+                        .setTitle("Select RNode")
+                        .setItems(labels, (dialog, which) ->
+                                portField.setText(found.get(which).devicePath))
+                        .setNegativeButton("Cancel", null)
+                        .show();
+            });
+        });
     }
 
     // ── Edit Interface Dialog ───────────────────────────────────────────
@@ -315,15 +452,15 @@ public class InterfacesActivity extends AppCompatActivity {
         switch (item.type) {
             case "RNodeInterface":
                 addField(form, fieldKeys, fieldViews, "frequency",
-                        "Frequency (Hz)", String.valueOf(item.frequency));
+                        "Frequency (Hz)", String.valueOf(item.frequency), InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "bandwidth",
-                        "Bandwidth (Hz)", String.valueOf(item.bandwidth));
+                        "Bandwidth (Hz)", String.valueOf(item.bandwidth), InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "txpower",
-                        "TX Power (dBm)", String.valueOf(item.txpower));
+                        "TX Power (dBm)", String.valueOf(item.txpower), InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "spreadingfactor",
-                        "Spreading Factor", String.valueOf(item.spreadingfactor));
+                        "Spreading Factor", String.valueOf(item.spreadingfactor), InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "codingrate",
-                        "Coding Rate", String.valueOf(item.codingrate));
+                        "Coding Rate", String.valueOf(item.codingrate), InputType.TYPE_CLASS_NUMBER);
                 break;
             case "UDPInterface":
                 addField(form, fieldKeys, fieldViews, "listen_ip",   "Listen IP",   "");

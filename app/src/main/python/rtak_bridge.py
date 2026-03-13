@@ -47,6 +47,7 @@ _reticulum   = None
 _identity    = None
 _destination = None
 _links       = {}          # link_hash_hex → RNS.Link
+_pending_links = {}        # id(link) → RNS.Link  (keeps outbound links alive until established)
 _known_peers = {}          # dest_hash_hex → {"identity": ..., "app_data": str}
 _own_hash    = None        # Our own destination hash as hex (for self-filter)
 _callbacks   = None        # Java-side callback object
@@ -60,11 +61,13 @@ _announce_app_data = b"RTAK Bridge"
 #          "vid": int|None, "pid": int|None}
 _managed_interfaces     = {}
 _interface_registry_path = None   # path to rtak_interfaces.json
+_announce_handler        = None   # current RTAKAnnounceHandler (tracked for clean deregistration)
 
 # ── Fragmentation constants ───────────────────────────────────────────────
 _HEADER_FMT  = ">HBB"            # msg_id(u16), index(u8), total(u8)
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)   # 4 bytes
-_CHUNK_SIZE  = 450                # payload bytes per fragment (safe under 500 MTU)
+_DEFAULT_CHUNK_SIZE = 410         # fallback if link.mdu unavailable
+_LINK_KEEPALIVE = 120             # seconds between link keepalive packets
 _FRAG_TIMEOUT = 15.0              # seconds before incomplete message is discarded
 
 # Per-peer send counters:  link_hash_hex → int (0–65535)
@@ -92,12 +95,21 @@ def _log(msg, level="INFO"):
 
 # ── Initialisation ────────────────────────────────────────────────────────
 def init(config_dir, callback_obj=None):
-    global RNS, _reticulum, _identity, _destination
-    global _callbacks, _running, _config_path, _own_hash
+    """
+    Start the bridge.  On the first call this also initialises Reticulum.
+    On subsequent calls (after stop_bridge()) it reuses the running RNS/Transport
+    instance and only recreates the bridge layer — avoiding the unsafe reinit path.
+    """
+    global RNS, _reticulum, _identity
+    global _callbacks, _config_path
 
     _callbacks   = callback_obj
     _config_path = config_dir
-    _running     = True
+
+    if _reticulum is not None:
+        # RNS already running — restart only the bridge layer on top of it.
+        _log("RNS already active — restarting bridge layer only")
+        return _start_bridge_layer()
 
     _log(f"Initialising Reticulum (config: {config_dir})")
     _notify_status("STARTING")
@@ -126,7 +138,37 @@ def init(config_dir, callback_obj=None):
             _identity.to_file(identity_path)
             _log(f"Generated new identity: {_identity}")
 
-        # Inbound destination
+        # Restore dynamically-managed interfaces (only on first start)
+        _load_interface_registry(config_dir)
+
+        return _start_bridge_layer()
+
+    except Exception as e:
+        _log(f"Init failed: {e}\n{traceback.format_exc()}", "ERROR")
+        _notify_status("ERROR")
+        return None
+
+
+def _start_bridge_layer():
+    """
+    Create (or recreate) the RNS destination and wire up callbacks.
+    Requires RNS/_reticulum/_identity to already be initialised.
+    Safe to call repeatedly after stop_bridge().
+    """
+    global _destination, _own_hash, _running, _announce_handler
+
+    _running = True
+    _notify_status("STARTING")
+
+    try:
+        # Deregister any previous announce handler to avoid duplicates
+        if _announce_handler is not None:
+            try:
+                RNS.Transport.announce_handlers.remove(_announce_handler)
+            except (ValueError, AttributeError):
+                pass
+
+        # Fresh inbound destination
         _destination = RNS.Destination(
             _identity,
             RNS.Destination.IN,
@@ -137,32 +179,35 @@ def init(config_dir, callback_obj=None):
         _destination.set_link_established_callback(_on_link_established)
 
         _own_hash = _destination.hash.hex()
-        _log(f"Own dest hash: {_own_hash}")
 
-        # Discover other RTAK nodes
-        RNS.Transport.register_announce_handler(RTAKAnnounceHandler())
+        # Register announce handler for peer discovery
+        _announce_handler = RTAKAnnounceHandler()
+        RNS.Transport.register_announce_handler(_announce_handler)
 
-        # Restore dynamically-managed interfaces from previous sessions
-        _load_interface_registry(config_dir)
+        # Reassembly cleanup (daemon thread exits when _running goes False)
+        threading.Thread(target=_reassembly_cleanup_loop, daemon=True).start()
 
-        # Start reassembly cleanup thread
-        t = threading.Thread(target=_reassembly_cleanup_loop, daemon=True)
-        t.start()
-
-        _log(f"Destination ready: {RNS.prettyhexrep(_destination.hash)}")
+        _log(f"Bridge layer ready. Dest: {RNS.prettyhexrep(_destination.hash)}")
         _notify_status("RUNNING")
         return RNS.prettyhexrep(_destination.hash)
 
     except Exception as e:
-        _log(f"Init failed: {e}\n{traceback.format_exc()}", "ERROR")
+        _log(f"Failed to start bridge layer: {e}\n{traceback.format_exc()}", "ERROR")
         _notify_status("ERROR")
+        _running = False
         return None
 
 
-def shutdown():
-    global _running
+def stop_bridge():
+    """
+    Stop the TAK bridge layer (links, destination, TCP state) without
+    touching RNS or Transport.  Call init() again to restart.
+    """
+    global _running, _destination, _announce_handler
+
     _running = False
-    _notify_status("STOPPED")
+
+    # Tear down all active links
     for lhex, link in list(_links.items()):
         try:
             link.teardown()
@@ -174,6 +219,52 @@ def shutdown():
         _send_counters.clear()
     with _reassembly_lock:
         _reassembly.clear()
+
+    # Deregister announce handler so no new peer callbacks fire
+    if _announce_handler is not None and RNS is not None:
+        try:
+            RNS.Transport.announce_handlers.remove(_announce_handler)
+        except (ValueError, AttributeError):
+            pass
+        _announce_handler = None
+
+    # Remove destination from Transport so no new inbound links arrive
+    if _destination is not None:
+        try:
+            _destination.set_link_established_callback(None)
+        except:
+            pass
+        try:
+            RNS.Transport.destinations.remove(_destination)
+        except (ValueError, AttributeError):
+            pass
+        _destination = None
+
+    _notify_status("STOPPED")
+    _log("Bridge stopped (RNS/Transport remain active)")
+
+
+def shutdown():
+    """
+    Full teardown: stop the bridge layer then shut down RNS entirely.
+    Called only when the Android service is destroyed (app close).
+    """
+    global _reticulum, _identity, _own_hash, RNS
+
+    stop_bridge()
+    _managed_interfaces.clear()
+
+    if _reticulum is not None:
+        try:
+            _reticulum.exit_handler()
+        except Exception as e:
+            _log(f"RNS exit_handler error: {e}", "WARN")
+
+    _reticulum = None
+    _identity  = None
+    _own_hash  = None
+    RNS        = None
+
     _log("Bridge shut down")
 
 
@@ -736,15 +827,26 @@ def _fragment_and_send(link, data):
     """
     lhex = link.hash.hex() if hasattr(link, "hash") else str(id(link))
     msg_id = _next_msg_id(lhex)
-    total  = (len(data) + _CHUNK_SIZE - 1) // _CHUNK_SIZE  # ceil division
+
+    # Use the link's actual MDU, minus our fragment header
+    try:
+        chunk_size = link.mdu - _HEADER_SIZE
+    except Exception:
+        chunk_size = _DEFAULT_CHUNK_SIZE
+
+    if chunk_size <= 0:
+        _log(f"Invalid chunk_size {chunk_size} (link.mdu={getattr(link, 'mdu', '?')}), using default", "WARN")
+        chunk_size = _DEFAULT_CHUNK_SIZE
+
+    total  = (len(data) + chunk_size - 1) // chunk_size  # ceil division
 
     if total > 255:
         _log(f"Message too large ({len(data)}B, {total} frags), dropping", "ERROR")
         return False
 
     for i in range(total):
-        offset = i * _CHUNK_SIZE
-        chunk  = data[offset : offset + _CHUNK_SIZE]
+        offset = i * chunk_size
+        chunk  = data[offset : offset + chunk_size]
         header = struct.pack(_HEADER_FMT, msg_id, i, total)
         pkt    = RNS.Packet(link, header + chunk)
         pkt.send()
@@ -868,7 +970,7 @@ def send_cot(cot_xml, dest_hash_hex=None):
             if sent > 0:
                 _log(f"Sent CoT to {sent} link(s) ({len(data)}B compressed)")
             else:
-                _log(f"No active links, CoT dropped ({len(data)}B)", "WARN")
+                _log(f"CoT dropped: {len(_links)} link(s), 0 successful ({len(data)}B)", "WARN")
             return sent > 0
 
     except Exception as e:
@@ -883,6 +985,17 @@ def _link_matches_dest(link, dest_hash_hex):
             return link.destination.hash.hex() == dest_hash_hex
     except:
         pass
+    return False
+
+
+def _has_active_link_to(dest_hash_hex):
+    """Return True if we already have a link (active or pending) to this destination."""
+    for link in list(_links.values()):
+        if _link_matches_dest(link, dest_hash_hex):
+            return True
+    for link in list(_pending_links.values()):
+        if _link_matches_dest(link, dest_hash_hex):
+            return True
     return False
 
 
@@ -921,9 +1034,11 @@ def connect_to_peer(dest_hash_hex):
         )
 
         link = RNS.Link(remote_dest)
+        link.keepalive = _LINK_KEEPALIVE
         link.set_link_established_callback(_on_outbound_link_established)
         link.set_link_closed_callback(_on_link_closed)
         link.set_packet_callback(_on_fragment_received)
+        _pending_links[id(link)] = link   # prevent GC until link establishes or closes
         _log(f"Establishing link to {dest_hash_hex[:12]}…")
         return True
 
@@ -976,12 +1091,14 @@ def _on_link_established(link):
     _links[lhex] = link
     link.set_packet_callback(_on_fragment_received)
     link.set_link_closed_callback(_on_link_closed)
+    link.keepalive = _LINK_KEEPALIVE
     _log(f"Inbound link from {lhex[:12]}")
     _notify_peer_connected(lhex)
 
 
 def _on_outbound_link_established(link):
     """Our outgoing link is now active."""
+    _pending_links.pop(id(link), None)
     lhex = link.hash.hex() if hasattr(link, "hash") else str(id(link))
     _links[lhex] = link
     _log(f"Outbound link established: {lhex[:12]}")
@@ -989,6 +1106,7 @@ def _on_outbound_link_established(link):
 
 
 def _on_link_closed(link):
+    _pending_links.pop(id(link), None)
     lhex = link.hash.hex() if hasattr(link, "hash") else str(id(link))
     _links.pop(lhex, None)
     with _send_counters_lock:
@@ -999,6 +1117,28 @@ def _on_link_closed(link):
         reason = "unknown"
     _log(f"Link closed ({reason}): {lhex[:12]}")
     _notify_peer_disconnected(lhex)
+
+    # Auto-reconnect: find which known peer this link belonged to
+    reconnect_hash = None
+    for dest_hash_hex in list(_known_peers):
+        if _link_matches_dest(link, dest_hash_hex):
+            reconnect_hash = dest_hash_hex
+            break
+
+    if reconnect_hash and _running:
+        def _delayed_reconnect(dhash):
+            time.sleep(5)
+            if not _running:
+                return
+            if not _has_active_link_to(dhash):
+                _log(f"Auto-reconnecting to {dhash[:12]}...")
+                connect_to_peer(dhash)
+
+        threading.Thread(
+            target=_delayed_reconnect,
+            args=(reconnect_hash,),
+            daemon=True,
+        ).start()
 
 
 class RTAKAnnounceHandler:
@@ -1028,7 +1168,7 @@ class RTAKAnnounceHandler:
             except:
                 pass
 
-        if is_new:
+        if is_new or not _has_active_link_to(hash_hex):
             threading.Thread(
                 target=connect_to_peer,
                 args=(hash_hex,),

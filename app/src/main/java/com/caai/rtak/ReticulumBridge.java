@@ -44,11 +44,17 @@ public class ReticulumBridge {
             String configPath = configDir.getAbsolutePath();
 
             // Create a Chaquopy-compatible proxy for the callback
-            PyObject result = bridgeModule.callAttr(
-                    "init",
-                    configPath,
-                    PyObject.fromJava(callback)
-            );
+            PyObject result = null;
+            try {
+                result = bridgeModule.callAttr(
+                        "init",
+                        configPath,
+                        PyObject.fromJava(callback)
+                );
+            }
+            catch (Exception e) {
+                Log.e(TAG, "init() failed", e);
+            }
 
             if (result != null && !result.toJava(String.class).isEmpty()) {
                 initialised = true;
@@ -66,7 +72,22 @@ public class ReticulumBridge {
     }
 
     /**
-     * Shut down Reticulum and all links.
+     * Stop only the bridge layer (links, destination) while leaving
+     * RNS/Transport running.  Safe to follow with {@link #init} to restart.
+     */
+    public void stopBridge() {
+        try {
+            bridgeModule.callAttr("stop_bridge");
+            initialised = false;
+            Log.i(TAG, "Bridge layer stopped");
+        } catch (Exception e) {
+            Log.e(TAG, "stopBridge() failed", e);
+        }
+    }
+
+    /**
+     * Full teardown: stop the bridge layer and shut down RNS entirely.
+     * Only call this when the Android service is being destroyed.
      */
     public void shutdown() {
         try {
