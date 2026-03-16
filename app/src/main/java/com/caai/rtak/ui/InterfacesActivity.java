@@ -25,15 +25,17 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.appcompat.widget.SwitchCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import com.google.android.material.floatingactionbutton.FloatingActionButton;
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver;
+import com.hoho.android.usbserial.driver.ProbeTable;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.caai.rtak.R;
 import com.caai.rtak.rnode.RNodeIdentifier;
+import com.caai.rtak.service.InterfaceDetector;
 import com.caai.rtak.service.TakBridgeService;
 
 import org.json.JSONArray;
@@ -45,8 +47,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * Displays all active RNS Transport interfaces and allows the user to add or
- * remove dynamically-managed interfaces at runtime.
+ * Displays all configured RNS interfaces with their detection status and allows
+ * the user to add, edit, or remove interface configurations.
+ * <p>
+ * When the bridge is running, interfaces are locked and cannot be modified.
  */
 public class InterfacesActivity extends AppCompatActivity {
 
@@ -55,6 +59,7 @@ public class InterfacesActivity extends AppCompatActivity {
 
     private RecyclerView rvInterfaces;
     private FloatingActionButton fabAdd;
+    private TextView tvLockedBanner;
 
     private InterfaceAdapter adapter;
     private TakBridgeService boundService;
@@ -89,12 +94,13 @@ public class InterfacesActivity extends AppCompatActivity {
 
         rvInterfaces = findViewById(R.id.rv_interfaces);
         fabAdd = findViewById(R.id.fab_add_interface);
+        tvLockedBanner = findViewById(R.id.tv_locked_banner);
 
         adapter = new InterfaceAdapter();
         rvInterfaces.setLayoutManager(new LinearLayoutManager(this));
         rvInterfaces.setAdapter(adapter);
 
-        fabAdd.setOnClickListener(v -> showAddInterfaceDialog(0, 0, ""));
+        fabAdd.setOnClickListener(v -> showAddInterfaceDialog());
 
         bindService(new Intent(this, TakBridgeService.class),
                 serviceConnection, Context.BIND_AUTO_CREATE);
@@ -104,6 +110,27 @@ public class InterfacesActivity extends AppCompatActivity {
             if (event == null) return;
             refreshInterfaces();
         });
+
+        // Observe locked state
+        TakBridgeService.interfacesLockedLive.observe(this, locked -> {
+            boolean isLocked = locked != null && locked;
+            tvLockedBanner.setVisibility(isLocked ? View.VISIBLE : View.GONE);
+            fabAdd.setVisibility(isLocked ? View.GONE : View.VISIBLE);
+            // Refresh to update UI state (remove buttons, etc.)
+            refreshInterfaces();
+        });
+
+        // Observe detection status (pre-start phase)
+        TakBridgeService.detectedInterfacesLive.observe(this, detected -> {
+            if (detected != null && !isLocked()) {
+                adapter.setItems(convertDetectedToItems(detected));
+            }
+        });
+    }
+
+    private boolean isLocked() {
+        Boolean locked = TakBridgeService.interfacesLockedLive.getValue();
+        return locked != null && locked;
     }
 
     @Override
@@ -126,11 +153,45 @@ public class InterfacesActivity extends AppCompatActivity {
 
     private void refreshInterfaces() {
         if (!isBound || boundService == null) return;
-        bgExecutor.submit(() -> {
-            String json = boundService.listInterfacesJson();
-            List<InterfaceItem> items = parseInterfaceJson(json);
-            runOnUiThread(() -> adapter.setItems(items));
-        });
+
+        if (isLocked()) {
+            // Bridge running: show live interface status from RNS
+            bgExecutor.submit(() -> {
+                String json = boundService.listInterfacesJson();
+                List<InterfaceItem> items = parseInterfaceJson(json);
+                runOnUiThread(() -> adapter.setItems(items));
+            });
+        }
+        // When unlocked, detectedInterfacesLive observer handles the UI
+    }
+
+    private List<InterfaceItem> convertDetectedToItems(
+            List<InterfaceDetector.DetectedInterface> detected) {
+        List<InterfaceItem> items = new ArrayList<>();
+        for (InterfaceDetector.DetectedInterface di : detected) {
+            InterfaceItem item = new InterfaceItem();
+            item.name = di.name;
+            item.type = di.type;
+            item.enabled = di.enabled;
+            item.detected = di.detected;
+            item.managed = true;
+            item.online = false;
+            if (di.config != null) {
+                item.port            = di.config.optString("port", "");
+                item.frequency       = di.config.optLong("frequency", 0);
+                item.bandwidth       = di.config.optLong("bandwidth", 0);
+                item.txpower         = di.config.optInt("txpower", 0);
+                item.spreadingfactor = di.config.optInt("spreadingfactor", 0);
+                item.codingrate      = di.config.optInt("codingrate", 0);
+            }
+            if (di.identifier != null) {
+                item.identifierMethod = di.identifier.optString("method", "always");
+                item.vid = di.identifier.optInt("vid", 0);
+                item.pid = di.identifier.optInt("pid", 0);
+            }
+            items.add(item);
+        }
+        return items;
     }
 
     private List<InterfaceItem> parseInterfaceJson(String json) {
@@ -145,11 +206,10 @@ public class InterfacesActivity extends AppCompatActivity {
                 item.online   = obj.optBoolean("online", false);
                 item.rxBytes  = obj.optLong("rx_bytes", 0);
                 item.txBytes  = obj.optLong("tx_bytes", 0);
-                item.managed      = obj.optBoolean("managed", false);
+                item.managed      = obj.optBoolean("managed", true);
                 item.enabled      = obj.optBoolean("enabled", true);
                 item.disconnected = obj.optBoolean("disconnected", false);
-                item.vid      = obj.optInt("vid", 0);
-                item.pid      = obj.optInt("pid", 0);
+                item.detected     = true; // If running, assume detected
                 JSONObject cfg = obj.optJSONObject("config");
                 if (cfg != null) {
                     item.port            = cfg.optString("port", "");
@@ -167,14 +227,13 @@ public class InterfacesActivity extends AppCompatActivity {
 
     // ── Add interface dialog ─────────────────────────────────────────────
 
-    /**
-     * Show a dialog to add a new interface.
-     *
-     * @param usbVid  Pre-filled from USB detection (0 = manual entry).
-     * @param usbPid  Pre-filled from USB detection (0 = manual entry).
-     * @param usbPath Device path hint from USB detection ("" = manual entry).
-     */
-    private void showAddInterfaceDialog(int usbVid, int usbPid, String usbPath) {
+    private void showAddInterfaceDialog() {
+        if (isLocked()) {
+            Toast.makeText(this, "Interfaces locked while RTAK is running",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         String[] types = {
                 "UDPInterface",
                 "TCPClientInterface",
@@ -184,13 +243,9 @@ public class InterfacesActivity extends AppCompatActivity {
                 "KISSInterface",
         };
 
-        // Pre-select RNodeInterface if triggered by USB attach
-        int defaultType = (usbVid != 0) ? 3 : 0;
-
         Spinner spinnerType = new Spinner(this);
         spinnerType.setAdapter(new ArrayAdapter<>(this,
                 android.R.layout.simple_spinner_dropdown_item, types));
-        spinnerType.setSelection(defaultType);
 
         EditText etName = new EditText(this);
         etName.setHint("Interface name (e.g. \"My RNode\")");
@@ -211,19 +266,17 @@ public class InterfacesActivity extends AppCompatActivity {
                         Toast.makeText(this, "Name is required", Toast.LENGTH_SHORT).show();
                         return;
                     }
-                    showTypeConfigDialog(name, type, usbVid, usbPid, usbPath);
+                    showTypeConfigDialog(name, type);
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
     }
 
-    private void showTypeConfigDialog(String name, String type,
-                                       int usbVid, int usbPid, String usbPath) {
+    private void showTypeConfigDialog(String name, String type) {
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(48, 16, 48, 0);
 
-        // Build type-specific fields
         List<String> fieldKeys = new ArrayList<>();
         List<EditText> fieldViews = new ArrayList<>();
 
@@ -233,17 +286,20 @@ public class InterfacesActivity extends AppCompatActivity {
                 addField(form, fieldKeys, fieldViews, "listen_port", "Listen Port",  "4242");
                 addField(form, fieldKeys, fieldViews, "forward_ip",  "Forward IP",   "255.255.255.255");
                 addField(form, fieldKeys, fieldViews, "forward_port","Forward Port", "4242");
+                addField(form, fieldKeys, fieldViews, "device",      "Bind to network device (optional, e.g. wlan0)", "");
                 break;
             case "TCPClientInterface":
                 addField(form, fieldKeys, fieldViews, "target_host", "Host / IP",  "");
                 addField(form, fieldKeys, fieldViews, "target_port", "Port",       "4242");
+                addField(form, fieldKeys, fieldViews, "device",      "Bind to network device (optional)", "");
                 break;
             case "TCPServerInterface":
                 addField(form, fieldKeys, fieldViews, "listen_ip",   "Listen IP",  "0.0.0.0");
                 addField(form, fieldKeys, fieldViews, "listen_port", "Listen Port","4242");
+                addField(form, fieldKeys, fieldViews, "device",      "Bind to network device (optional)", "");
                 break;
             case "RNodeInterface":
-                addRNodePortField(form, fieldKeys, fieldViews, usbPath);
+                addRNodePortField(form, fieldKeys, fieldViews, "");
                 addField(form, fieldKeys, fieldViews, "frequency",      "Frequency (Hz)",  "915000000", InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "bandwidth",      "Bandwidth (Hz)",  "125000",    InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "txpower",        "TX Power (dBm)",  "7",         InputType.TYPE_CLASS_NUMBER);
@@ -251,7 +307,7 @@ public class InterfacesActivity extends AppCompatActivity {
                 addField(form, fieldKeys, fieldViews, "codingrate",     "Coding Rate",     "5",         InputType.TYPE_CLASS_NUMBER);
                 break;
             case "SerialInterface":
-                addField(form, fieldKeys, fieldViews, "port",  "Serial Port", usbPath.isEmpty() ? "/dev/ttyUSB0" : usbPath);
+                addField(form, fieldKeys, fieldViews, "port",  "Serial Port", "/dev/ttyUSB0");
                 addField(form, fieldKeys, fieldViews, "speed", "Baud Rate",   "115200");
                 break;
             case "KISSInterface":
@@ -265,22 +321,56 @@ public class InterfacesActivity extends AppCompatActivity {
                 .setView(form)
                 .setPositiveButton("Add", (d, w) -> {
                     try {
+                        // Build the config sub-object
                         JSONObject config = new JSONObject();
-                        config.put("name", name);
-                        config.put("type", type);
-                        config.put("enabled", "yes");
+                        String device = ""; // for identifier
                         for (int i = 0; i < fieldKeys.size(); i++) {
+                            String key = fieldKeys.get(i);
                             String val = fieldViews.get(i).getText().toString().trim();
                             if (!val.isEmpty()) {
-                                config.put(fieldKeys.get(i), val);
+                                if ("device".equals(key)) {
+                                    device = val; // handled separately in identifier
+                                } else {
+                                    config.put(key, val);
+                                }
                             }
                         }
-                        if (usbVid != 0) {
-                            config.put("vid", usbVid);
-                            config.put("pid", usbPid);
+
+                        // Build identifier
+                        JSONObject identifier = new JSONObject();
+                        if (type.equals("RNodeInterface") || type.equals("SerialInterface")
+                                || type.equals("KISSInterface")) {
+                            // For USB devices — scan current USB bus for VID/PID
+                            int[] vidPid = detectUsbVidPid();
+                            if (vidPid[0] != 0 && vidPid[1] != 0) {
+                                identifier.put("method", "usb");
+                                identifier.put("vid", vidPid[0]);
+                                identifier.put("pid", vidPid[1]);
+                                // Don't store port in config (resolved at detection time)
+                                config.remove("port");
+                            } else {
+                                identifier.put("method", "always");
+                            }
+                        } else if (!device.isEmpty()) {
+                            identifier.put("method", "network_device");
+                            identifier.put("device", device);
+                        } else {
+                            identifier.put("method", "always");
                         }
-                        boundService.addInterface(config.toString(), usbVid, usbPid);
-                        Toast.makeText(this, "Adding " + name + "…", Toast.LENGTH_SHORT).show();
+
+                        // Build the full registry entry
+                        JSONObject entry = new JSONObject();
+                        entry.put("name", name);
+                        entry.put("type", type);
+                        entry.put("enabled", true);
+                        entry.put("config", config);
+                        entry.put("identifier", identifier);
+
+                        if (boundService != null) {
+                            boundService.addInterface(entry.toString());
+                            Toast.makeText(this, "Adding " + name + "...",
+                                    Toast.LENGTH_SHORT).show();
+                        }
                     } catch (Exception e) {
                         Toast.makeText(this, "Error: " + e.getMessage(),
                                 Toast.LENGTH_LONG).show();
@@ -288,6 +378,28 @@ public class InterfacesActivity extends AppCompatActivity {
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private UsbSerialProber buildProber() {
+        ProbeTable table = UsbSerialProber.getDefaultProbeTable();
+        table.addProduct(0x239A, 0x8029, CdcAcmSerialDriver.class); // RAK4630 nRF52840
+        return new UsbSerialProber(table);
+    }
+
+    /**
+     * Detect VID/PID of the first connected USB serial device.
+     * Returns {vid, pid} or {0, 0} if none found.
+     */
+    private int[] detectUsbVidPid() {
+        try {
+            UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+            List<UsbSerialDriver> drivers = buildProber().findAllDrivers(usbManager);
+            if (!drivers.isEmpty()) {
+                android.hardware.usb.UsbDevice dev = drivers.get(0).getDevice();
+                return new int[]{dev.getVendorId(), dev.getProductId()};
+            }
+        } catch (Exception ignored) {}
+        return new int[]{0, 0};
     }
 
     private void addField(LinearLayout parent, List<String> keys, List<EditText> views,
@@ -358,18 +470,9 @@ public class InterfacesActivity extends AppCompatActivity {
         views.add(et);
     }
 
-    /**
-     * Probes connected USB serial devices with the RNode KISS protocol and
-     * populates portField with the confirmed device path.
-     *
-     * On the first tap, any devices that still need USB permission are requested;
-     * the user grants them in the system dialog and taps Scan again.
-     * On subsequent taps (permissions granted), the KISS probe runs on bgExecutor.
-     */
     private void scanForRNodes(EditText portField, Button scanBtn) {
         UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        List<UsbSerialDriver> drivers =
-                UsbSerialProber.getDefaultProber().findAllDrivers(usbManager);
+        List<UsbSerialDriver> drivers = buildProber().findAllDrivers(usbManager);
 
         if (drivers.isEmpty()) {
             Toast.makeText(this, "No USB serial devices connected", Toast.LENGTH_SHORT).show();
@@ -396,9 +499,8 @@ public class InterfacesActivity extends AppCompatActivity {
             return;
         }
 
-        // All devices have permission — run the KISS probe
         scanBtn.setEnabled(false);
-        Toast.makeText(this, "Scanning for RNodes…", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "Scanning for RNodes...", Toast.LENGTH_SHORT).show();
 
         bgExecutor.submit(() -> {
             List<RNodeIdentifier.RNodeInfo> found =
@@ -417,7 +519,6 @@ public class InterfacesActivity extends AppCompatActivity {
                             Toast.LENGTH_LONG).show();
                     return;
                 }
-                // Multiple confirmed RNodes — let the user pick
                 String[] labels = new String[found.size()];
                 for (int i = 0; i < found.size(); i++) {
                     labels[i] = found.get(i).toString();
@@ -435,12 +536,19 @@ public class InterfacesActivity extends AppCompatActivity {
     // ── Edit Interface Dialog ───────────────────────────────────────────
 
     private void showEditInterfaceDialog(InterfaceItem item) {
+        if (isLocked()) {
+            Toast.makeText(this, "Interfaces locked while RTAK is running",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(48, 16, 48, 0);
 
         // Enable/Disable toggle
-        SwitchCompat switchEnabled = new SwitchCompat(this);
+        androidx.appcompat.widget.SwitchCompat switchEnabled =
+                new androidx.appcompat.widget.SwitchCompat(this);
         switchEnabled.setText("Enabled");
         switchEnabled.setChecked(item.enabled);
         form.addView(switchEnabled);
@@ -484,27 +592,41 @@ public class InterfacesActivity extends AppCompatActivity {
                 .setPositiveButton("Save", (d, w) -> {
                     boolean wantEnabled = switchEnabled.isChecked();
 
-                    // Handle enable/disable toggle change
                     if (wantEnabled != item.enabled && boundService != null) {
                         boundService.setInterfaceEnabled(item.name, wantEnabled);
                     }
 
-                    // Handle config changes (only if enabled or becoming enabled)
                     if (wantEnabled && boundService != null) {
                         try {
                             JSONObject config = new JSONObject();
-                            config.put("name", item.name);
-                            config.put("type", item.type);
-                            if (item.port != null && !item.port.isEmpty()) {
-                                config.put("port", item.port);
-                            }
                             for (int i = 0; i < fieldKeys.size(); i++) {
                                 String val = fieldViews.get(i).getText().toString().trim();
                                 if (!val.isEmpty()) {
                                     config.put(fieldKeys.get(i), val);
                                 }
                             }
-                            boundService.updateInterface(config.toString());
+
+                            // Build the full entry for save_interface_config
+                            JSONObject entry = new JSONObject();
+                            entry.put("name", item.name);
+                            entry.put("type", item.type);
+                            entry.put("enabled", wantEnabled);
+                            entry.put("config", config);
+
+                            // Preserve existing identifier
+                            JSONObject identifier = new JSONObject();
+                            if (item.identifierMethod != null) {
+                                identifier.put("method", item.identifierMethod);
+                                if ("usb".equals(item.identifierMethod)) {
+                                    identifier.put("vid", item.vid);
+                                    identifier.put("pid", item.pid);
+                                }
+                            } else {
+                                identifier.put("method", "always");
+                            }
+                            entry.put("identifier", identifier);
+
+                            boundService.updateInterface(entry.toString());
                         } catch (Exception e) {
                             Toast.makeText(this, "Error: " + e.getMessage(),
                                     Toast.LENGTH_LONG).show();
@@ -529,12 +651,14 @@ public class InterfacesActivity extends AppCompatActivity {
 
     // ── Adapter ──────────────────────────────────────────────────────────
 
-    private static class InterfaceItem {
+    static class InterfaceItem {
         String name, type;
         boolean online, managed, enabled, disconnected;
+        boolean detected;
         long rxBytes, txBytes;
         int vid, pid;
-        // RNode config fields
+        String identifierMethod;
+        // Config fields
         String port;
         long frequency, bandwidth;
         int txpower, spreadingfactor, codingrate;
@@ -563,19 +687,35 @@ public class InterfacesActivity extends AppCompatActivity {
             InterfaceItem item = items.get(pos);
             h.tvName.setText(item.name);
             h.tvType.setText(item.type);
-            h.tvTraffic.setText(String.format("↓%s ↑%s",
+            h.tvTraffic.setText(String.format("\u2193%s \u2191%s",
                     formatBytes(item.rxBytes), formatBytes(item.txBytes)));
 
-            // Visual state: disconnected (red) > disabled (gray+fade) > online/offline
-            h.itemView.setAlpha(!item.enabled && !item.disconnected ? 0.5f : 1.0f);
-            h.statusDot.setBackgroundColor(
-                    item.disconnected ? Color.RED     :
-                    !item.enabled     ? Color.DKGRAY  :
-                    item.online       ? Color.GREEN   : Color.GRAY);
+            boolean locked = isLocked();
 
-            // Only managed interfaces can be removed by the user
-            h.btnRemove.setVisibility(item.managed ? View.VISIBLE : View.INVISIBLE);
+            if (locked) {
+                // When locked (running): show online/offline status
+                h.itemView.setAlpha(item.disconnected ? 0.5f : 1.0f);
+                h.statusDot.setBackgroundColor(
+                        item.disconnected ? Color.RED     :
+                        item.online       ? Color.GREEN   : Color.GRAY);
+            } else {
+                // When unlocked (pre-start): show detection status
+                h.itemView.setAlpha(!item.enabled ? 0.5f : 1.0f);
+                h.statusDot.setBackgroundColor(
+                        !item.enabled     ? Color.DKGRAY  :
+                        item.detected     ? Color.GREEN   :
+                                            Color.parseColor("#FFC107")); // amber
+            }
+
+            // Remove button: only visible when unlocked
+            h.btnRemove.setVisibility(locked ? View.GONE : View.VISIBLE);
             h.btnRemove.setOnClickListener(v -> {
+                if (locked) {
+                    Toast.makeText(InterfacesActivity.this,
+                            "Interfaces locked while RTAK is running",
+                            Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 new AlertDialog.Builder(InterfacesActivity.this)
                         .setTitle("Remove Interface")
                         .setMessage("Remove \"" + item.name + "\"?")
@@ -583,7 +723,7 @@ public class InterfacesActivity extends AppCompatActivity {
                             if (boundService != null) {
                                 boundService.removeInterface(item.name);
                                 Toast.makeText(InterfacesActivity.this,
-                                        "Removing " + item.name + "…",
+                                        "Removing " + item.name + "...",
                                         Toast.LENGTH_SHORT).show();
                             }
                         })
@@ -591,12 +731,14 @@ public class InterfacesActivity extends AppCompatActivity {
                         .show();
             });
 
-            // Tap on managed interface card opens edit dialog
-            if (item.managed) {
-                h.itemView.setOnClickListener(v -> showEditInterfaceDialog(item));
+            // Tap to edit (only when unlocked)
+            if (locked) {
+                h.itemView.setOnClickListener(v ->
+                        Toast.makeText(InterfacesActivity.this,
+                                "Interfaces locked while RTAK is running",
+                                Toast.LENGTH_SHORT).show());
             } else {
-                h.itemView.setOnClickListener(null);
-                h.itemView.setClickable(false);
+                h.itemView.setOnClickListener(v -> showEditInterfaceDialog(item));
             }
         }
 

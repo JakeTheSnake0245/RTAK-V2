@@ -12,6 +12,13 @@
         android:title="@string/action_settings"
         app:showAsAction="never" />
 
+    <!--
+    <item
+        android:id="@+id/action_restart_app"
+        android:title="@string/action_restart_app"
+        app:showAsAction="never" />
+    -->
+
     <item
         android:id="@+id/action_close_app"
         android:title="@string/action_close_app"

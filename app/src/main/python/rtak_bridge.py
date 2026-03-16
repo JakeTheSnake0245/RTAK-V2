@@ -62,6 +62,7 @@ _announce_app_data = b"RTAK Bridge"
 _managed_interfaces     = {}
 _interface_registry_path = None   # path to rtak_interfaces.json
 _announce_handler        = None   # current RTAKAnnounceHandler (tracked for clean deregistration)
+_interfaces_locked       = False  # True once RNS starts; prevents all CRUD until app restart
 
 # ── Fragmentation constants ───────────────────────────────────────────────
 _HEADER_FMT  = ">HBB"            # msg_id(u16), index(u8), total(u8)
@@ -99,16 +100,22 @@ def init(config_dir, callback_obj=None):
     Start the bridge.  On the first call this also initialises Reticulum.
     On subsequent calls (after stop_bridge()) it reuses the running RNS/Transport
     instance and only recreates the bridge layer — avoiding the unsafe reinit path.
+
+    IMPORTANT: Call generate_rns_config() from Java BEFORE calling init() so
+    that the config file contains the correct interfaces.  init() does NOT
+    dynamically add interfaces — they come from the generated config file.
     """
     global RNS, _reticulum, _identity
-    global _callbacks, _config_path
+    global _callbacks, _config_path, _interfaces_locked, _interface_registry_path
 
     _callbacks   = callback_obj
     _config_path = config_dir
+    _interface_registry_path = os.path.join(config_dir, "rtak_interfaces.json")
 
     if _reticulum is not None:
         # RNS already running — restart only the bridge layer on top of it.
         _log("RNS already active — restarting bridge layer only")
+        _interfaces_locked = True
         return _start_bridge_layer()
 
     _log(f"Initialising Reticulum (config: {config_dir})")
@@ -116,7 +123,14 @@ def init(config_dir, callback_obj=None):
 
     try:
         os.makedirs(config_dir, exist_ok=True)
-        _ensure_default_config(config_dir)
+
+        # Migrate old interface registry schema if needed
+        _migrate_interface_registry(config_dir)
+
+        # Ensure a config file exists (generate_rns_config should have been
+        # called already by Java, but fall back to a default if missing)
+        if not os.path.isfile(os.path.join(config_dir, "config")):
+            _ensure_default_config(config_dir)
 
         # Android workaround: signal.signal() only works on main thread
         import signal
@@ -138,8 +152,9 @@ def init(config_dir, callback_obj=None):
             _identity.to_file(identity_path)
             _log(f"Generated new identity: {_identity}")
 
-        # Restore dynamically-managed interfaces (only on first start)
-        _load_interface_registry(config_dir)
+        # Lock interfaces — they are now baked into the RNS config file.
+        # No dynamic additions/removals allowed until app restart.
+        _interfaces_locked = True
 
         return _start_bridge_layer()
 
@@ -383,6 +398,9 @@ def add_interface(config_json_str):
     Returns:
         The interface name on success, or None on failure.
     """
+    if _interfaces_locked:
+        _log("add_interface: interfaces are locked while RTAK is running", "WARN")
+        return None
     if _reticulum is None or not _running:
         _log("add_interface: bridge not running", "WARN")
         return None
@@ -441,6 +459,9 @@ def remove_interface(name):
     Returns True on success, False if the interface was not found or removal
     failed.
     """
+    if _interfaces_locked:
+        _log("remove_interface: interfaces are locked while RTAK is running", "WARN")
+        return False
     entry = _managed_interfaces.get(name)
     if entry is None:
         _log(f"remove_interface: '{name}' not found in managed interfaces", "WARN")
@@ -478,6 +499,9 @@ def update_interface(config_json_str):
     Returns:
         The interface name on success, or None on failure.
     """
+    if _interfaces_locked:
+        _log("update_interface: interfaces are locked while RTAK is running", "WARN")
+        return None
     if _reticulum is None or not _running:
         _log("update_interface: bridge not running", "WARN")
         return None
@@ -538,6 +562,9 @@ def disable_interface(name):
 
     Returns True on success.
     """
+    if _interfaces_locked:
+        _log("disable_interface: interfaces are locked while RTAK is running", "WARN")
+        return False
     entry = _managed_interfaces.get(name)
     if entry is None:
         _log(f"disable_interface: '{name}' not found", "WARN")
@@ -573,6 +600,9 @@ def enable_interface(name):
     Re-instantiates from stored config and adds to Transport.
     Returns True on success.
     """
+    if _interfaces_locked:
+        _log("enable_interface: interfaces are locked while RTAK is running", "WARN")
+        return False
     entry = _managed_interfaces.get(name)
     if entry is None:
         _log(f"enable_interface: '{name}' not found", "WARN")
@@ -605,6 +635,9 @@ def disconnect_interface(name):
     can show it as disconnected (red indicator) rather than removing it.
     Returns True on success.
     """
+    if _interfaces_locked:
+        _log("disconnect_interface: interfaces are locked while RTAK is running", "WARN")
+        return False
     entry = _managed_interfaces.get(name)
     if entry is None:
         _log(f"disconnect_interface: '{name}' not found", "WARN")
@@ -770,6 +803,307 @@ def _save_interface_registry():
             json.dump(registry, f, indent=2)
     except Exception as e:
         _log(f"Failed to save interface registry: {e}", "ERROR")
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  INTERFACE CONFIG — PRE-START OPERATIONS (no RNS required)
+# ══════════════════════════════════════════════════════════════════════════
+
+def _registry_path(config_dir):
+    """Return the path to rtak_interfaces.json for a given config directory."""
+    return os.path.join(config_dir, "rtak_interfaces.json")
+
+
+def _read_registry(config_dir):
+    """Read the interface registry JSON. Returns a list of dicts, or [] on error."""
+    path = _registry_path(config_dir)
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        _log(f"Failed to read interface registry: {e}", "ERROR")
+        return []
+
+
+def _write_registry(config_dir, registry):
+    """Write the interface registry list back to JSON."""
+    path = _registry_path(config_dir)
+    os.makedirs(config_dir, exist_ok=True)
+    try:
+        with open(path, "w") as f:
+            json.dump(registry, f, indent=2)
+        return True
+    except Exception as e:
+        _log(f"Failed to write interface registry: {e}", "ERROR")
+        return False
+
+
+# ── Schema migration ────────────────────────────────────────────────────
+
+def _migrate_interface_registry(config_dir):
+    """Migrate rtak_interfaces.json from old flat vid/pid schema to new
+    identifier-based schema.  Idempotent — entries that already have an
+    'identifier' key are left untouched.
+
+    Old format:  { ..., "vid": 4292, "pid": 60000 }
+    New format:  { ..., "identifier": { "method": "usb", "vid": 4292, "pid": 60000 } }
+    """
+    registry = _read_registry(config_dir)
+    if not registry:
+        return
+
+    changed = False
+    for entry in registry:
+        if "identifier" in entry:
+            continue  # already migrated
+
+        itype = entry.get("type", "")
+        vid = entry.pop("vid", None)
+        pid = entry.pop("pid", None)
+        config = entry.get("config", {})
+
+        if vid and pid:
+            entry["identifier"] = {"method": "usb", "vid": vid, "pid": pid}
+            # Remove port from config — it's resolved at detection time
+            config.pop("port", None)
+            changed = True
+        elif itype in ("UDPInterface", "TCPClientInterface", "TCPServerInterface"):
+            device = config.pop("device", None)
+            if device:
+                entry["identifier"] = {"method": "network_device", "device": device}
+            else:
+                entry["identifier"] = {"method": "always"}
+            changed = True
+        else:
+            # Serial/KISS without vid/pid, or unknown type — default to always
+            entry["identifier"] = {"method": "always"}
+            changed = True
+
+    if changed:
+        # Back up old file
+        old_path = _registry_path(config_dir)
+        bak_path = old_path + ".bak"
+        try:
+            import shutil
+            shutil.copy2(old_path, bak_path)
+        except Exception:
+            pass
+        _write_registry(config_dir, registry)
+        _log("Migrated interface registry to new identifier schema")
+
+
+# ── Pre-start CRUD (no RNS required) ────────────────────────────────────
+
+def read_interface_configs(config_dir):
+    """Return interface configs as a JSON string.  No RNS required.
+    Java calls this for the detection loop and UI display.
+    """
+    return json.dumps(_read_registry(config_dir))
+
+
+def save_interface_config(config_dir, config_json_str):
+    """Add or update an interface config in rtak_interfaces.json.
+
+    Pure file I/O — no RNS interaction.
+
+    Args:
+        config_dir:       Reticulum config directory path.
+        config_json_str:  JSON string with name, type, enabled, config, identifier.
+    Returns:
+        The interface name on success, None on failure.
+    """
+    try:
+        new_entry = json.loads(config_json_str)
+    except Exception as e:
+        _log(f"save_interface_config: invalid JSON: {e}", "ERROR")
+        return None
+
+    name = new_entry.get("name", "").strip()
+    if not name:
+        _log("save_interface_config: 'name' is required", "ERROR")
+        return None
+
+    registry = _read_registry(config_dir)
+
+    # Update existing entry with the same name, or append
+    found = False
+    for i, entry in enumerate(registry):
+        if entry.get("name") == name:
+            registry[i] = new_entry
+            found = True
+            break
+
+    if not found:
+        registry.append(new_entry)
+
+    if _write_registry(config_dir, registry):
+        _log(f"Interface config {'updated' if found else 'saved'}: {name}")
+        return name
+    return None
+
+
+def remove_interface_config(config_dir, name):
+    """Remove an interface config from rtak_interfaces.json by name.
+
+    Pure file I/O — no RNS interaction.
+    Returns True on success, False if not found or error.
+    """
+    registry = _read_registry(config_dir)
+    original_len = len(registry)
+    registry = [e for e in registry if e.get("name") != name]
+
+    if len(registry) == original_len:
+        _log(f"remove_interface_config: '{name}' not found", "WARN")
+        return False
+
+    if _write_registry(config_dir, registry):
+        _log(f"Interface config removed: {name}")
+        return True
+    return False
+
+
+# ── RNS config file generation ──────────────────────────────────────────
+
+def generate_rns_config(config_dir, detected_interfaces_json=None):
+    """Generate the RNS config file from rtak_interfaces.json.
+
+    Called by Java BEFORE init() so that RNS.Reticulum() reads the correct
+    interfaces.
+
+    Args:
+        config_dir:  Reticulum config directory path.
+        detected_interfaces_json:  Optional JSON string — a dict mapping
+            interface names to their resolved device paths.
+            e.g. {"RNode 900MHz": "/dev/bus/usb/001/002", "WiFi UDP": null}
+            If provided, only interfaces present in this dict (and enabled)
+            are included.  If None, all enabled interfaces are included.
+    Returns:
+        True on success, False on failure.
+    """
+    try:
+        detected = None
+        if detected_interfaces_json:
+            detected = json.loads(detected_interfaces_json)
+
+        registry = _read_registry(config_dir)
+
+        # ── Preserve existing [reticulum] and [logging] from current config ──
+        config_file = os.path.join(config_dir, "config")
+        reticulum_section = """\
+[reticulum]
+  enable_transport = True
+  share_instance   = No
+  shared_instance_port = 37428
+  instance_control_port = 37429
+  panic_on_interface_error = No
+"""
+        logging_section = """\
+[logging]
+  loglevel = 4
+"""
+        if os.path.isfile(config_file):
+            try:
+                with open(config_file, "r") as f:
+                    existing = f.read()
+                # Extract [reticulum] section
+                ret_match = _extract_section(existing, "reticulum")
+                if ret_match:
+                    reticulum_section = ret_match
+                log_match = _extract_section(existing, "logging")
+                if log_match:
+                    logging_section = log_match
+            except Exception:
+                pass  # Use defaults
+
+        # ── Build [interfaces] section ──
+        interfaces_lines = ["[interfaces]"]
+
+        for entry in registry:
+            if not entry.get("enabled", True):
+                continue
+
+            name = entry.get("name", "").strip()
+            itype = entry.get("type", "").strip()
+            config = dict(entry.get("config", {}))
+
+            if not name or not itype:
+                continue
+
+            # If we have a detected map, only include detected interfaces
+            if detected is not None and name not in detected:
+                continue
+
+            # For USB interfaces, inject the resolved device path
+            ident = entry.get("identifier", {})
+            if ident.get("method") == "usb" and detected and name in detected:
+                resolved_path = detected[name]
+                if resolved_path:
+                    config["port"] = resolved_path
+                elif "port" not in config:
+                    # USB device not detected / no path available — skip
+                    _log(f"Skipping '{name}': USB device not detected", "WARN")
+                    continue
+
+            interfaces_lines.append(f"  [[{name}]]")
+            interfaces_lines.append(f"    type = {itype}")
+            interfaces_lines.append(f"    enabled = Yes")
+
+            for key, value in config.items():
+                # Write each config value
+                interfaces_lines.append(f"    {key} = {value}")
+
+            interfaces_lines.append("")  # blank line between interfaces
+
+        # ── Write the config file ──
+        config_content = (
+            "# RTAK Bridge — Reticulum Config (auto-generated)\n\n"
+            + reticulum_section + "\n"
+            + logging_section + "\n"
+            + "\n".join(interfaces_lines) + "\n"
+        )
+
+        os.makedirs(config_dir, exist_ok=True)
+        with open(config_file, "w") as f:
+            f.write(config_content)
+
+        iface_count = sum(1 for e in registry
+                          if e.get("enabled", True)
+                          and (detected is None or e.get("name") in detected))
+        _log(f"Generated RNS config with {iface_count} interface(s)")
+        return True
+
+    except Exception as e:
+        _log(f"generate_rns_config failed: {e}\n{traceback.format_exc()}", "ERROR")
+        return False
+
+
+def _extract_section(text, section_name):
+    """Extract a [section] block from an RNS config file (TOML-like).
+    Returns the section text including the header, or None if not found.
+    """
+    lines = text.splitlines(True)
+    result = []
+    in_section = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped == f"[{section_name}]":
+            in_section = True
+            result.append(line)
+        elif in_section:
+            # Next top-level section starts
+            if stripped.startswith("[") and not stripped.startswith("[["):
+                break
+            result.append(line)
+    return "".join(result) if result else None
+
+
+# ── Lock state ──────────────────────────────────────────────────────────
+
+def is_interfaces_locked():
+    """Return True if interfaces are locked (bridge is running)."""
+    return _interfaces_locked
 
 
 # ── Announce ──────────────────────────────────────────────────────────────

@@ -1,6 +1,8 @@
 package com.caai.rtak.ui;
 
 import android.Manifest;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -32,6 +34,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import com.caai.rtak.R;
 import com.caai.rtak.model.BridgeStatus;
+import com.caai.rtak.service.InterfaceDetector;
 import com.caai.rtak.service.TakBridgeService;
 
 import org.json.JSONArray;
@@ -94,7 +97,7 @@ public class MainActivity extends AppCompatActivity {
                     (TakBridgeService.LocalBinder) service;
             boundService = binder.getService();
             isBound = true;
-            btnStartStop.setText("Stop Bridge");
+            updateStartStopButton();
             refreshInterfaceChips();
         }
 
@@ -117,6 +120,16 @@ public class MainActivity extends AppCompatActivity {
         initViews();
         requestPermissions();
         observeState();
+
+        // Start the foreground service immediately (detection mode).
+        // The bridge itself only starts when the user clicks "Start Bridge".
+        Intent intent = new Intent(this, TakBridgeService.class);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
     }
 
     @Override
@@ -186,6 +199,30 @@ public class MainActivity extends AppCompatActivity {
         TakBridgeService.interfaceEventLive.observe(this, event -> {
             if (event != null) refreshInterfaceChips();
         });
+        TakBridgeService.interfacesLockedLive.observe(this, locked -> {
+            updateStartStopButton();
+            refreshInterfaceChips();
+        });
+        // Also refresh chips when detection results change
+        TakBridgeService.detectedInterfacesLive.observe(this, detected -> {
+            if (detected != null) {
+                Boolean locked = TakBridgeService.interfacesLockedLive.getValue();
+                if (locked == null || !locked) {
+                    // Pre-start phase: show detection status in chips
+                    List<InterfaceChipItem> chips = new ArrayList<>();
+                    for (InterfaceDetector.DetectedInterface di : detected) {
+                        InterfaceChipItem chip = new InterfaceChipItem();
+                        chip.name = di.name;
+                        chip.type = stripInterfaceSuffix(di.type);
+                        chip.online = false;
+                        chip.detected = di.detected;
+                        chip.enabled = di.enabled;
+                        chips.add(chip);
+                    }
+                    chipAdapter.setItems(chips);
+                }
+            }
+        });
     }
 
     private void updateUi(BridgeStatus s) {
@@ -199,7 +236,7 @@ public class MainActivity extends AppCompatActivity {
         }
         tvBridgeState.setTextColor(stateColor);
 
-        tvDestHash.setText(s.destinationHash.isEmpty() ? "—" : s.destinationHash);
+        tvDestHash.setText(s.destinationHash.isEmpty() ? "\u2014" : s.destinationHash);
 
         tvTakStatus.setText(s.takServerRunning
                 ? "Listening on port " + s.takServerPort
@@ -208,7 +245,7 @@ public class MainActivity extends AppCompatActivity {
         if (s.takServerRunning) {
             tvTakConnectAddr.setText("localhost:" + s.takServerPort);
         } else {
-            tvTakConnectAddr.setText("—");
+            tvTakConnectAddr.setText("\u2014");
         }
 
         tvTakClients.setText(s.takClients > 0 ? "YES" : "NO");
@@ -219,12 +256,32 @@ public class MainActivity extends AppCompatActivity {
         tvCotToTak.setText(String.valueOf(s.cotToTak));
         tvCotToRns.setText(String.valueOf(s.cotToRns));
 
-        // Refresh interface chips once RNS finishes initialising (static
-        // config interfaces never fire interfaceEventLive on their own)
+        // Refresh interface chips once RNS finishes initialising
         if ("RUNNING".equals(s.bridgeState) && !lastBridgeState.equals("RUNNING")) {
             refreshInterfaceChips();
         }
         lastBridgeState = s.bridgeState;
+
+        updateStartStopButton();
+    }
+
+    private void updateStartStopButton() {
+        Boolean locked = TakBridgeService.interfacesLockedLive.getValue();
+        boolean isLocked = locked != null && locked;
+
+        if (isLocked) {
+            if ("RUNNING".equals(lastBridgeState) || "STARTING".equals(lastBridgeState)) {
+                btnStartStop.setText("Stop Bridge");
+                btnStartStop.setEnabled(true);
+            } else {
+                // Locked but stopped — interfaces remain locked but bridge can restart
+                btnStartStop.setText("Start Bridge");
+                btnStartStop.setEnabled(true);
+            }
+        } else {
+            btnStartStop.setText("Start Bridge");
+            btnStartStop.setEnabled(true);
+        }
     }
 
     private void appendLog(String msg) {
@@ -250,11 +307,16 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshInterfaceChips() {
         if (!isBound || boundService == null) return;
-        bgExecutor.submit(() -> {
-            String json = boundService.listInterfacesJson();
-            List<InterfaceChipItem> items = parseChipItems(json);
-            runOnUiThread(() -> chipAdapter.setItems(items));
-        });
+        Boolean locked = TakBridgeService.interfacesLockedLive.getValue();
+        if (locked != null && locked) {
+            // Bridge running: show live status
+            bgExecutor.submit(() -> {
+                String json = boundService.listInterfacesJson();
+                List<InterfaceChipItem> items = parseChipItems(json);
+                runOnUiThread(() -> chipAdapter.setItems(items));
+            });
+        }
+        // When unlocked, detectedInterfacesLive observer handles chips
     }
 
     private List<InterfaceChipItem> parseChipItems(String json) {
@@ -267,13 +329,15 @@ public class MainActivity extends AppCompatActivity {
                 item.name   = obj.optString("name", "?");
                 item.type   = stripInterfaceSuffix(obj.optString("type", "?"));
                 item.online = obj.optBoolean("online", false);
+                item.detected = true;
+                item.enabled = obj.optBoolean("enabled", true);
                 items.add(item);
             }
         } catch (Exception ignored) {}
         return items;
     }
 
-    /** Strips the "Interface" suffix for compact display: "UDPInterface" → "UDP" */
+    /** Strips the "Interface" suffix for compact display: "UDPInterface" -> "UDP" */
     private static String stripInterfaceSuffix(String type) {
         if (type.endsWith("Interface")) {
             return type.substring(0, type.length() - "Interface".length());
@@ -284,26 +348,24 @@ public class MainActivity extends AppCompatActivity {
     // ── Service Control ────────────────────────────────────────────────
 
     private void toggleService() {
-        if (isBound && boundService != null) {
-            if ("RUNNING".equals(lastBridgeState) || "STARTING".equals(lastBridgeState)) {
-                // Bridge is running — stop just the bridge, keep the service alive
-                boundService.stopBridgeAsync();
-                btnStartStop.setText("Start Bridge");
-            } else {
-                // Service is bound but bridge is stopped — restart the bridge
-                boundService.restartBridge();
-                btnStartStop.setText("Stop Bridge");
-            }
+        if (!isBound || boundService == null) return;
+
+        Boolean locked = TakBridgeService.interfacesLockedLive.getValue();
+        boolean isLocked = locked != null && locked;
+
+        if (isLocked && ("RUNNING".equals(lastBridgeState) || "STARTING".equals(lastBridgeState))) {
+            boundService.stopBridgeAsync();
         } else {
-            // Service not running yet — start it (which also starts the bridge)
-            Intent intent = new Intent(this, TakBridgeService.class);
+            // Bridge not yet started — start it
+            Intent startIntent = new Intent(this, TakBridgeService.class);
+            startIntent.setAction(TakBridgeService.ACTION_START_BRIDGE);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent);
+                startForegroundService(startIntent);
             } else {
-                startService(intent);
+                startService(startIntent);
             }
-            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE);
-            btnStartStop.setText("Stop Bridge");
+            btnStartStop.setText("Starting...");
+            btnStartStop.setEnabled(false);
         }
     }
 
@@ -311,13 +373,38 @@ public class MainActivity extends AppCompatActivity {
         if (boundService != null) {
             boundService.sendAnnounce();
         } else {
-            appendLog("Bridge not running — start it first.");
+            appendLog("Bridge not running \u2014 start it first.");
         }
+    }
+
+    /** Stops the service and kills the process entirely. */
+    private void killApp() {
+        if (isBound) {
+            unbindService(serviceConnection);
+            isBound = false;
+        }
+        stopService(new Intent(this, TakBridgeService.class));
+        finishAndRemoveTask();
+        android.os.Process.killProcess(android.os.Process.myPid());
+    }
+
+    /** Schedules a relaunch via AlarmManager (500 ms delay), then kills the process. */
+    private void restartApp() {
+        Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
+        if (launchIntent != null) {
+            launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_NEW_TASK);
+            PendingIntent pi = PendingIntent.getActivity(
+                    this, 0, launchIntent,
+                    PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+            AlarmManager mgr = (AlarmManager) getSystemService(ALARM_SERVICE);
+            mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 500, pi);
+        }
+        killApp();
     }
 
     private void showConnectDialog() {
         if (boundService == null) {
-            appendLog("Bridge not running — start it first.");
+            appendLog("Bridge not running \u2014 start it first.");
             return;
         }
 
@@ -356,13 +443,11 @@ public class MainActivity extends AppCompatActivity {
             logBuffer.setLength(0);
             tvLog.setText("");
             return true;
+//        } else if (item.getItemId() == R.id.action_restart_app) {
+//            restartApp();
+//            return true;
         } else if (item.getItemId() == R.id.action_close_app) {
-            if (isBound) {
-                unbindService(serviceConnection);
-                isBound = false;
-            }
-            stopService(new Intent(this, TakBridgeService.class));
-            finishAndRemoveTask();
+            killApp();
             return true;
         }
         return super.onOptionsItemSelected(item);
@@ -373,6 +458,8 @@ public class MainActivity extends AppCompatActivity {
     private static class InterfaceChipItem {
         String name, type;
         boolean online;
+        boolean detected;
+        boolean enabled;
     }
 
     private static class InterfaceChipAdapter
@@ -399,7 +486,20 @@ public class MainActivity extends AppCompatActivity {
             InterfaceChipItem item = items.get(pos);
             h.tvName.setText(item.name);
             h.tvType.setText(item.type);
-            h.dot.setBackgroundColor(item.online ? Color.parseColor("#4CAF50") : Color.GRAY);
+
+            // Color: green = online/detected+enabled, amber = enabled+not detected, gray = disabled
+            int dotColor;
+            if (item.online) {
+                dotColor = Color.parseColor("#4CAF50"); // green (running)
+            } else if (!item.enabled) {
+                dotColor = Color.GRAY; // disabled
+            } else if (item.detected) {
+                dotColor = Color.parseColor("#4CAF50"); // green (detected, ready)
+            } else {
+                dotColor = Color.parseColor("#FFC107"); // amber (not detected)
+            }
+            h.dot.setBackgroundColor(dotColor);
+
             h.itemView.setOnClickListener(v ->
                     v.getContext().startActivity(
                             new Intent(v.getContext(), InterfacesActivity.class)));

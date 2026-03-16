@@ -5,6 +5,8 @@ import android.hardware.usb.UsbDeviceConnection;
 import android.hardware.usb.UsbManager;
 import android.util.Log;
 
+import com.hoho.android.usbserial.driver.CdcAcmSerialDriver;
+import com.hoho.android.usbserial.driver.ProbeTable;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialPort;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
@@ -95,7 +97,9 @@ public class RNodeIdentifier {
     public List<RNodeInfo> discoverRNodes(Context context) {
         List<RNodeInfo> result = new ArrayList<>();
         UsbManager manager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
-        List<UsbSerialDriver> drivers = UsbSerialProber.getDefaultProber().findAllDrivers(manager);
+        ProbeTable probeTable = UsbSerialProber.getDefaultProbeTable();
+        probeTable.addProduct(0x239A, 0x8029, CdcAcmSerialDriver.class); // RAK4630 nRF52840
+        List<UsbSerialDriver> drivers = new UsbSerialProber(probeTable).findAllDrivers(manager);
 
         if (drivers.isEmpty()) {
             Log.d(TAG, "No USB serial devices connected.");
@@ -115,8 +119,14 @@ public class RNodeIdentifier {
                     port.open(connection);
                     port.setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE);
 
-                    // Discard boot garbage (ESP32-based boards emit UART noise on connect)
-                    drainPort(port);
+                    // CDC ACM devices (nRF52840, etc.) gate communication on DTR.
+                    // usb-serial-for-android sets DTR=false on open, so we must assert it.
+                    // Non-CDC devices (CP2102, CH340, FT232…) may emit UART boot garbage instead.
+                    if (driver instanceof CdcAcmSerialDriver) {
+                        port.setDTR(true);
+                    } else {
+                        drainPort(port);
+                    }
 
                     // Step 1: confirm RNode firmware via CMD_DETECT handshake
                     writeKissFrame(port, CMD_DETECT, DETECT_REQ);
@@ -215,12 +225,12 @@ public class RNodeIdentifier {
 
     /** Reads and un-escapes one KISS frame within the given timeout, or returns null. */
     private KissFrame readKissFrame(UsbSerialPort port, int timeoutMs) throws IOException {
-        long deadline = System.currentTimeMillis() + timeoutMs;
         boolean inFrame = false, escape = false;
         byte command = (byte) 0xFE;
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         byte[] buf = new byte[256];
 
+        long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             int len = port.read(buf, 50);
             for (int i = 0; i < len; i++) {
@@ -229,7 +239,7 @@ public class RNodeIdentifier {
                     return new KissFrame(command, payload.toByteArray());
                 } else if (b == FEND) {
                     inFrame = true;
-                    command  = (byte) 0xFE;
+                    command = (byte) 0xFE;
                     payload.reset();
                 } else if (inFrame) {
                     if (payload.size() == 0 && command == (byte) 0xFE) {

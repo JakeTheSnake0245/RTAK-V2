@@ -7,7 +7,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
 import android.os.Binder;
@@ -32,6 +31,7 @@ import com.caai.rtak.model.BridgeStatus;
 import com.caai.rtak.ui.MainActivity;
 
 import java.io.File;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +59,10 @@ public class TakBridgeService extends Service implements RTAKCallback,
     static final String ACTION_USB_PERMISSION =
             "com.caai.rtak.USB_PERMISSION";
 
+    /** Intent action: start the bridge (as opposed to just starting the detection service). */
+    public static final String ACTION_START_BRIDGE =
+            "com.caai.rtak.START_BRIDGE";
+
     // ── Public observable state ─────────────────────────────────────────
     public static final MutableLiveData<BridgeStatus> statusLive =
             new MutableLiveData<>(new BridgeStatus());
@@ -67,6 +71,12 @@ public class TakBridgeService extends Service implements RTAKCallback,
     /** Fires whenever a managed interface is added, removed, or changes state. */
     public static final MutableLiveData<String[]> interfaceEventLive =
             new MutableLiveData<>();
+    /** Whether interface configuration is locked (bridge has been started). */
+    public static final MutableLiveData<Boolean> interfacesLockedLive =
+            new MutableLiveData<>(false);
+    /** Detection status of configured interfaces (pre-start phase). */
+    public static final MutableLiveData<List<InterfaceDetector.DetectedInterface>>
+            detectedInterfacesLive = new MutableLiveData<>();
 
     // ── Internal components ─────────────────────────────────────────────
     private ReticulumBridge bridge;
@@ -74,6 +84,8 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private PowerManager.WakeLock wakeLock;
     private UsbManager usbManager;
     private BroadcastReceiver usbReceiver;
+    private InterfaceDetector interfaceDetector;
+    private volatile boolean interfacesLocked = false;
 
     private final ExecutorService bgExecutor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -114,17 +126,31 @@ public class TakBridgeService extends Service implements RTAKCallback,
         super.onCreate();
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         registerUsbReceiver();
-        Log.i(TAG, "Service created");
+
+        // Start the interface detection loop (scans for configured hardware)
+        String configDir = new File(getFilesDir(), "reticulum").getAbsolutePath();
+        interfaceDetector = new InterfaceDetector(this, configDir, detectedInterfacesLive);
+        interfaceDetector.start();
+
+        Log.i(TAG, "Service created — interface detection active");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (!serviceRunning) {
             serviceRunning = true;
-            startForeground(NOTIFICATION_ID, buildNotification("Starting…"));
+            startForeground(NOTIFICATION_ID,
+                    buildNotification("Ready — configure interfaces, then start bridge"));
             acquireWakeLock();
-            startBridge();
         }
+
+        // Only start the bridge if explicitly requested via ACTION_START_BRIDGE
+        if (intent != null && ACTION_START_BRIDGE.equals(intent.getAction())) {
+            if (bridge == null) {   // allow restart after stop
+                startBridge();
+            }
+        }
+
         return START_STICKY;
     }
 
@@ -133,6 +159,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
         super.onDestroy();
         serviceRunning = false;
 
+        if (interfaceDetector != null) interfaceDetector.stop();
         unregisterUsbReceiver();
         if (heartbeatScheduler != null) heartbeatScheduler.shutdownNow();
         if (tcpServer != null) tcpServer.stop();
@@ -153,8 +180,36 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private void startBridge() {
         bgExecutor.submit(() -> {
             try {
-                // 1. Start the Reticulum bridge (Python)
+                // 1. Stop the detection loop (no longer needed once bridge starts)
+                if (interfaceDetector != null) {
+                    interfaceDetector.stop();
+                }
+
+                // 2. Do one final fresh scan for latest device paths
+                if (interfaceDetector != null) {
+                    interfaceDetector.scanNow();
+                    // Brief pause to let the final scan complete
+                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                }
+
+                // 3. Build the detected-interfaces map (name → device path)
+                JSONObject detectedMap = (interfaceDetector != null)
+                        ? interfaceDetector.buildDetectedMap()
+                        : new JSONObject();
+
+                // 4. Generate the RNS config file from JSON interface configs
                 bridge = new ReticulumBridge();
+                boolean configOk = bridge.generateRnsConfig(
+                        getApplicationContext(), detectedMap.toString());
+                if (!configOk) {
+                    postLog("WARNING: RNS config generation failed — using defaults");
+                }
+
+                // 5. Lock interfaces BEFORE init
+                interfacesLocked = true;
+                mainHandler.post(() -> interfacesLockedLive.setValue(true));
+
+                // 6. Start the Reticulum bridge (reads the generated config)
                 String destHash = bridge.init(getApplicationContext(), this);
 
                 if (destHash != null) {
@@ -171,7 +226,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
                     updateStatus(s -> s.bridgeState = "ERROR");
                 }
 
-                // 2. Start the TCP TAK server
+                // 7. Start the TCP TAK server
                 tcpServer = new CotTcpServer(TAK_PORT, this);
                 tcpServer.start();
                 postLog("TAK TCP server started on port " + TAK_PORT);
@@ -180,7 +235,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
                     s.takServerPort = TAK_PORT;
                 });
 
-                // 3. Start heartbeat to keep ATAK connections alive
+                // 8. Start heartbeat to keep ATAK connections alive
                 heartbeatScheduler = Executors.newSingleThreadScheduledExecutor();
                 heartbeatScheduler.scheduleAtFixedRate(() -> {
                     if (tcpServer != null && tcpServer.isRunning()
@@ -338,6 +393,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
      * Stop only the Python bridge (TCP server + RNS) while keeping the
      * Android foreground service alive.  Runs on the background executor
      * so it never blocks the main thread.
+     * <p>
+     * <b>Note:</b> Interfaces remain locked after stopping.  The user must
+     * close and restart the app to modify interface configurations.
      */
     public void stopBridgeAsync() {
         bgExecutor.submit(() -> {
@@ -359,17 +417,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 s.takClients = 0;
                 s.rnsPeers = 0;
             });
-            updateNotification("Stopped — tap Start Bridge to reconnect");
+            // Interfaces remain locked — do NOT set interfacesLocked = false
+            updateNotification("Stopped — tap Start Bridge to restart");
         });
-    }
-
-    /**
-     * (Re)start the bridge after it has been stopped via {@link #stopBridgeAsync()}.
-     * Safe to call even if the bridge is already running — guarded internally.
-     */
-    public void restartBridge() {
-        if (bridge != null) return; // already running
-        startBridge();
     }
 
     /**
@@ -401,95 +451,91 @@ public class TakBridgeService extends Service implements RTAKCallback,
         return bridge;
     }
 
-    /**
-     * Add an RNS interface at runtime.
-     *
-     * @param configJson  JSON config — must include "name" and "type" at minimum.
-     * @param vid         USB Vendor ID if this interface was triggered by USB
-     *                    attach (pass 0 if not applicable).
-     * @param pid         USB Product ID (pass 0 if not applicable).
-     */
-    public void addInterface(String configJson, int vid, int pid) {
-        if (bridge != null && bridge.isInitialised()) {
-            // Bridge is running — add live into RNS Transport
-            bgExecutor.submit(() -> {
-                // Inject vid/pid into config JSON so the Python registry can store them
-                String enriched = configJson;
-                if (vid != 0 && pid != 0) {
-                    enriched = configJson.trim();
-                    if (enriched.endsWith("}")) {
-                        enriched = enriched.substring(0, enriched.length() - 1)
-                                + ",\"vid\":" + vid + ",\"pid\":" + pid + "}";
-                    }
-                }
-                String name = bridge.addInterface(enriched);
-                if (name != null) {
-                    postLog("Interface added: " + name);
-                } else {
-                    postLog("ERROR: Failed to add interface");
-                    mainHandler.post(() -> android.widget.Toast.makeText(this,
-                            "Failed to add interface — check port and settings",
-                            android.widget.Toast.LENGTH_LONG).show());
-                }
-            });
-        } else {
-            // Bridge not running — persist to registry; Python loads it on next start
-            bgExecutor.submit(() -> {
-                String name = writeToRegistry(configJson, vid, pid);
-                if (name != null) {
-                    postLog("Interface saved: " + name + " (will connect when bridge starts)");
-                    mainHandler.post(() -> interfaceEventLive.setValue(new String[]{name, "ADDED"}));
-                } else {
-                    postLog("ERROR: Failed to save interface to registry");
-                    mainHandler.post(() -> android.widget.Toast.makeText(this,
-                            "Failed to save interface",
-                            android.widget.Toast.LENGTH_LONG).show());
-                }
-            });
-        }
-    }
+    private static final String LOCKED_MSG =
+            "Interface configuration is locked while RTAK is running. "
+            + "Close and restart the app to modify interfaces.";
 
     /**
-     * Remove a dynamically-managed RNS interface by name.
+     * Save a new interface config to the JSON registry.
+     * Only allowed when the bridge has NOT been started (interfaces unlocked).
      */
-    public void removeInterface(String name) {
-        if (bridge == null) return;
+    public void addInterface(String configJson) {
+        if (interfacesLocked) {
+            mainHandler.post(() -> android.widget.Toast.makeText(this,
+                    LOCKED_MSG, android.widget.Toast.LENGTH_LONG).show());
+            return;
+        }
         bgExecutor.submit(() -> {
-            boolean ok = bridge.removeInterface(name);
-            postLog(ok ? "Interface removed: " + name
-                       : "ERROR: Failed to remove interface: " + name);
+            String name = ReticulumBridge.saveInterfaceConfig(
+                    getApplicationContext(), configJson);
+            if (name != null) {
+                postLog("Interface saved: " + name);
+                mainHandler.post(() -> interfaceEventLive.setValue(
+                        new String[]{name, "ADDED"}));
+                if (interfaceDetector != null) interfaceDetector.scanNow();
+            } else {
+                postLog("ERROR: Failed to save interface");
+                mainHandler.post(() -> android.widget.Toast.makeText(this,
+                        "Failed to save interface",
+                        android.widget.Toast.LENGTH_LONG).show());
+            }
         });
     }
 
     /**
-     * Return a JSON array of all active RNS interfaces (for the UI to display).
-     * Runs synchronously on the calling thread — call from a background thread.
+     * Remove an interface config from the JSON registry by name.
+     * Only allowed when the bridge has NOT been started.
      */
-    public String listInterfacesJson() {
-        if (bridge != null) return bridge.listInterfacesJson();
-        // Bridge not running — read persisted registry so the UI still shows saved interfaces
-        return readRegistryJson();
+    public void removeInterface(String name) {
+        if (interfacesLocked) {
+            mainHandler.post(() -> android.widget.Toast.makeText(this,
+                    LOCKED_MSG, android.widget.Toast.LENGTH_LONG).show());
+            return;
+        }
+        bgExecutor.submit(() -> {
+            boolean ok = ReticulumBridge.removeInterfaceConfig(
+                    getApplicationContext(), name);
+            postLog(ok ? "Interface removed: " + name
+                       : "ERROR: Failed to remove interface: " + name);
+            if (ok) {
+                mainHandler.post(() -> interfaceEventLive.setValue(
+                        new String[]{name, "REMOVED"}));
+                if (interfaceDetector != null) interfaceDetector.scanNow();
+            }
+        });
     }
 
     /**
-     * Update the config of an existing managed RNS interface.
-     * Also saves the new LoRa settings to SharedPreferences by band.
+     * Return a JSON array of all RNS interfaces (for the UI to display).
+     * When bridge is running, returns live interface status.
+     * When bridge is NOT running, returns persisted configs from the registry.
+     * Runs synchronously — call from a background thread.
+     */
+    public String listInterfacesJson() {
+        if (bridge != null && bridge.isInitialised()) {
+            return bridge.listInterfacesJson();
+        }
+        return ReticulumBridge.readInterfaceConfigs(getApplicationContext());
+    }
+
+    /**
+     * Update an existing interface config in the JSON registry.
+     * Only allowed when the bridge has NOT been started.
      */
     public void updateInterface(String configJson) {
-        if (bridge == null) return;
+        if (interfacesLocked) {
+            mainHandler.post(() -> android.widget.Toast.makeText(this,
+                    LOCKED_MSG, android.widget.Toast.LENGTH_LONG).show());
+            return;
+        }
         bgExecutor.submit(() -> {
-            String name = bridge.updateInterface(configJson);
+            String name = ReticulumBridge.saveInterfaceConfig(
+                    getApplicationContext(), configJson);
             if (name != null) {
                 postLog("Interface updated: " + name);
-                // Save remembered settings for this band
-                try {
-                    JSONObject cfg = new JSONObject(configJson);
-                    long freq = cfg.optLong("frequency", 0);
-                    if (freq > 0) {
-                        String band = classifyBand(freq);
-                        saveRememberedRnodeSettings(band, cfg);
-                    }
-                } catch (Exception ignored) {}
+                mainHandler.post(() -> interfaceEventLive.setValue(
+                        new String[]{name, "UPDATED"}));
+                if (interfaceDetector != null) interfaceDetector.scanNow();
             } else {
                 postLog("ERROR: Failed to update interface");
             }
@@ -497,161 +543,52 @@ public class TakBridgeService extends Service implements RTAKCallback,
     }
 
     /**
-     * Enable or disable a managed RNS interface.
+     * Enable or disable an interface config in the JSON registry.
+     * Only allowed when the bridge has NOT been started.
      */
     public void setInterfaceEnabled(String name, boolean enabled) {
-        if (bridge == null) return;
+        if (interfacesLocked) {
+            mainHandler.post(() -> android.widget.Toast.makeText(this,
+                    LOCKED_MSG, android.widget.Toast.LENGTH_LONG).show());
+            return;
+        }
+        // Read the current config, toggle enabled, write back
         bgExecutor.submit(() -> {
-            boolean ok = bridge.setInterfaceEnabled(name, enabled);
-            postLog(ok ? "Interface " + (enabled ? "enabled" : "disabled") + ": " + name
-                       : "ERROR: Failed to " + (enabled ? "enable" : "disable") + ": " + name);
+            try {
+                String json = ReticulumBridge.readInterfaceConfigs(
+                        getApplicationContext());
+                JSONArray arr = new JSONArray(json);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject entry = arr.getJSONObject(i);
+                    if (name.equals(entry.optString("name"))) {
+                        entry.put("enabled", enabled);
+                        String result = ReticulumBridge.saveInterfaceConfig(
+                                getApplicationContext(), entry.toString());
+                        if (result != null) {
+                            postLog("Interface " + (enabled ? "enabled" : "disabled")
+                                    + ": " + name);
+                            mainHandler.post(() -> interfaceEventLive.setValue(
+                                    new String[]{name, enabled ? "ENABLED" : "DISABLED"}));
+                            if (interfaceDetector != null) interfaceDetector.scanNow();
+                        }
+                        return;
+                    }
+                }
+                postLog("ERROR: Interface not found: " + name);
+            } catch (Exception e) {
+                postLog("ERROR: " + e.getMessage());
+            }
         });
     }
 
-    // ── Pre-bridge interface registry helpers ────────────────────────────
-    // Used when the bridge is not yet running to read/write rtak_interfaces.json
-    // directly, matching the format Python's _save/_load_interface_registry uses.
-
-    private File getRegistryFile() {
-        return new File(getFilesDir(), "reticulum/rtak_interfaces.json");
-    }
-
-    /**
-     * Read rtak_interfaces.json and return a JSON array in the same format as
-     * bridge.listInterfacesJson() so the UI can display saved-but-not-live interfaces.
-     */
-    private String readRegistryJson() {
-        File f = getRegistryFile();
-        if (!f.exists()) return "[]";
-        try {
-            StringBuilder sb = new StringBuilder();
-            try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader(f))) {
-                String line;
-                while ((line = br.readLine()) != null) sb.append(line);
-            }
-            JSONArray registry = new JSONArray(sb.toString());
-            JSONArray result   = new JSONArray();
-            for (int i = 0; i < registry.length(); i++) {
-                JSONObject rec   = registry.getJSONObject(i);
-                JSONObject entry = new JSONObject();
-                entry.put("name",         rec.optString("name"));
-                entry.put("type",         rec.optString("type"));
-                entry.put("online",       false);
-                entry.put("rx_bytes",     0);
-                entry.put("tx_bytes",     0);
-                entry.put("managed",      true);
-                entry.put("enabled",      rec.optBoolean("enabled", true));
-                entry.put("disconnected", false);
-                if (rec.has("vid")) entry.put("vid", rec.get("vid"));
-                if (rec.has("pid")) entry.put("pid", rec.get("pid"));
-                entry.put("config",       rec.optJSONObject("config"));
-                result.put(entry);
-            }
-            return result.toString();
-        } catch (Exception e) {
-            Log.w(TAG, "readRegistryJson: " + e.getMessage());
-            return "[]";
-        }
-    }
-
-    /**
-     * Append a new interface record to rtak_interfaces.json without requiring the
-     * bridge to be running.  Matches the schema Python's _save_interface_registry writes.
-     *
-     * @return The interface name on success, or null on failure / duplicate.
-     */
-    private String writeToRegistry(String configJson, int vid, int pid) {
-        try {
-            JSONObject config = new JSONObject(configJson);
-            String name = config.optString("name", "").trim();
-            String type = config.optString("type", "").trim();
-            if (name.isEmpty() || type.isEmpty()) return null;
-
-            // Build the "config" sub-object (strip top-level metadata fields)
-            JSONObject cfg = new JSONObject(configJson);
-            cfg.remove("name");
-            cfg.remove("type");
-            cfg.remove("enabled");
-            cfg.remove("vid");
-            cfg.remove("pid");
-
-            JSONObject record = new JSONObject();
-            record.put("name",    name);
-            record.put("type",    type);
-            record.put("enabled", true);
-            record.put("config",  cfg);
-            if (vid != 0) record.put("vid", vid);
-            if (pid != 0) record.put("pid", pid);
-
-            File f = getRegistryFile();
-            //noinspection ResultOfMethodCallIgnored
-            f.getParentFile().mkdirs();
-
-            // Load existing records; reject duplicates
-            JSONArray registry = new JSONArray();
-            if (f.exists()) {
-                StringBuilder sb = new StringBuilder();
-                try (java.io.BufferedReader br =
-                             new java.io.BufferedReader(new java.io.FileReader(f))) {
-                    String line;
-                    while ((line = br.readLine()) != null) sb.append(line);
-                }
-                registry = new JSONArray(sb.toString());
-                for (int i = 0; i < registry.length(); i++) {
-                    if (name.equals(registry.getJSONObject(i).optString("name"))) {
-                        Log.w(TAG, "writeToRegistry: '" + name + "' already exists");
-                        return null;
-                    }
-                }
-            }
-
-            registry.put(record);
-            try (java.io.FileWriter fw = new java.io.FileWriter(f)) {
-                fw.write(registry.toString(2));
-            }
-            return name;
-        } catch (Exception e) {
-            Log.e(TAG, "writeToRegistry failed", e);
-            return null;
-        }
-    }
-
-    // ── Remembered RNode Settings ────────────────────────────────────────
-
-    private static final String RNODE_PREFS = "rnode_remembered_settings";
-
-    private String classifyBand(long frequency) {
-        return frequency >= 2_400_000_000L ? "2.4GHz" : "900MHz";
-    }
-
-    private JSONObject getRememberedRnodeSettings(String band) {
-        SharedPreferences prefs = getSharedPreferences(RNODE_PREFS, MODE_PRIVATE);
-        JSONObject config = new JSONObject();
-        try {
-            config.put("frequency",      prefs.getLong("frequency_" + band,
-                    "2.4GHz".equals(band) ? 2400000000L : 915000000L));
-            config.put("bandwidth",      prefs.getLong("bandwidth_" + band, 125000L));
-            config.put("txpower",        prefs.getInt("txpower_" + band, 7));
-            config.put("spreadingfactor",prefs.getInt("spreadingfactor_" + band, 8));
-            config.put("codingrate",     prefs.getInt("codingrate_" + band, 5));
-        } catch (Exception e) {
-            Log.w(TAG, "getRememberedRnodeSettings: " + e.getMessage());
-        }
-        return config;
-    }
-
-    private void saveRememberedRnodeSettings(String band, JSONObject config) {
-        SharedPreferences.Editor ed =
-                getSharedPreferences(RNODE_PREFS, MODE_PRIVATE).edit();
-        ed.putLong("frequency_" + band,       config.optLong("frequency"));
-        ed.putLong("bandwidth_" + band,       config.optLong("bandwidth"));
-        ed.putInt("txpower_" + band,          config.optInt("txpower"));
-        ed.putInt("spreadingfactor_" + band,  config.optInt("spreadingfactor"));
-        ed.putInt("codingrate_" + band,       config.optInt("codingrate"));
-        ed.apply();
+    /** Whether interface configuration is currently locked. */
+    public boolean isInterfacesLocked() {
+        return interfacesLocked;
     }
 
     // ── USB Device Detection ─────────────────────────────────────────────
+    // USB events now only trigger detection scans (no auto-add behaviour).
+    // The InterfaceDetector handles matching against configured interfaces.
 
     private void registerUsbReceiver() {
         usbReceiver = new BroadcastReceiver() {
@@ -662,14 +599,26 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 if (device == null) return;
 
                 if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
-                    onUsbDeviceAttached(device);
+                    postLog("USB device attached: " + String.format(
+                            "VID=%04X PID=%04X", device.getVendorId(), device.getProductId()));
+                    if (!interfacesLocked && interfaceDetector != null) {
+                        interfaceDetector.scanNow();
+                    }
                 } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(action)) {
-                    onUsbDeviceDetached(device);
+                    postLog("USB device detached: " + String.format(
+                            "VID=%04X PID=%04X", device.getVendorId(), device.getProductId()));
+                    if (!interfacesLocked && interfaceDetector != null) {
+                        interfaceDetector.scanNow();
+                    }
+                    // When locked, RNS handles the disconnect internally
                 } else if (ACTION_USB_PERMISSION.equals(action)) {
                     boolean granted = intent.getBooleanExtra(
                             UsbManager.EXTRA_PERMISSION_GRANTED, false);
                     if (granted) {
-                        onUsbPermissionGranted(device);
+                        postLog("USB permission granted for " + device.getDeviceName());
+                        if (!interfacesLocked && interfaceDetector != null) {
+                            interfaceDetector.scanNow();
+                        }
                     } else {
                         postLog("USB permission denied for: " + device.getDeviceName());
                     }
@@ -698,117 +647,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
             }
             usbReceiver = null;
         }
-    }
-
-    private void onUsbDeviceAttached(UsbDevice device) {
-        int vid = device.getVendorId();
-        int pid = device.getProductId();
-        if (!isKnownRnodeDevice(vid, pid)) return;
-
-        postLog("RNode-compatible USB device attached: "
-                + String.format("VID=%04X PID=%04X", vid, pid));
-
-        if (usbManager.hasPermission(device)) {
-            onUsbPermissionGranted(device);
-        } else {
-            PendingIntent permissionIntent = PendingIntent.getBroadcast(
-                    this, 0,
-                    new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()),
-                    PendingIntent.FLAG_MUTABLE);
-            usbManager.requestPermission(device, permissionIntent);
-            postLog("Requesting USB permission…");
-        }
-    }
-
-    private void onUsbDeviceDetached(UsbDevice device) {
-        int vid = device.getVendorId();
-        int pid = device.getProductId();
-        // No device-type guard — disconnect any managed interface with this VID/PID,
-        // regardless of whether it is an RNode, Ethernet NIC, or other peripheral.
-        String name = findManagedInterfaceName(vid, pid);
-        if (name != null) {
-            postLog("USB device detached — marking interface disconnected: " + name);
-            final String ifaceName = name;
-            bgExecutor.submit(() -> {
-                boolean ok = bridge.disconnectInterface(ifaceName);
-                postLog(ok ? "Interface marked disconnected: " + ifaceName
-                           : "ERROR: Failed to disconnect interface: " + ifaceName);
-            });
-        }
-    }
-
-    private void onUsbPermissionGranted(UsbDevice device) {
-        int vid = device.getVendorId();
-        int pid = device.getProductId();
-        String port = device.getDeviceName();
-        postLog("USB permission granted for "
-                + String.format("VID=%04X PID=%04X", vid, pid));
-
-        // Check if a managed interface with this VID/PID already exists
-        String existing = findManagedInterfaceName(vid, pid);
-        if (existing != null) {
-            // Re-enable existing disabled interface instead of creating duplicate
-            postLog("Re-enabling existing interface: " + existing);
-            setInterfaceEnabled(existing, true);
-            return;
-        }
-
-        // Auto-add with remembered settings for the default band (900MHz)
-        String band = "900MHz";
-        try {
-            JSONObject remembered = getRememberedRnodeSettings(band);
-            JSONObject config = new JSONObject();
-            config.put("name", "RNode " + band);
-            config.put("type", "RNodeInterface");
-            config.put("enabled", "yes");
-            config.put("port", port);
-            config.put("frequency", remembered.optLong("frequency", 915000000L));
-            config.put("bandwidth", remembered.optLong("bandwidth", 125000L));
-            config.put("txpower", remembered.optInt("txpower", 7));
-            config.put("spreadingfactor", remembered.optInt("spreadingfactor", 8));
-            config.put("codingrate", remembered.optInt("codingrate", 5));
-
-            addInterface(config.toString(), vid, pid);
-        } catch (Exception e) {
-            Log.e(TAG, "Auto-add RNode failed", e);
-            postLog("ERROR: Failed to auto-add RNode: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Attempt to find the name of a managed RNode interface matching a VID/PID.
-     * Queries the Python bridge's interface list JSON.
-     */
-    private String findManagedInterfaceName(int vid, int pid) {
-        if (bridge == null) return null;
-        try {
-            String json = bridge.listInterfacesJson();
-            org.json.JSONArray arr = new org.json.JSONArray(json);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject obj = arr.getJSONObject(i);
-                if (obj.optBoolean("managed") &&
-                        obj.optInt("vid") == vid &&
-                        obj.optInt("pid") == pid) {
-                    return obj.optString("name");
-                }
-            }
-        } catch (Exception e) {
-            Log.w(TAG, "findManagedInterfaceName: " + e.getMessage());
-        }
-        return null;
-    }
-
-    /** Returns true if the VID/PID is a known RNode-compatible serial chip. */
-    private static boolean isKnownRnodeDevice(int vid, int pid) {
-        // CP2102 / CP2104 (Silicon Labs) — most common
-        if (vid == 0x10C4 && pid == 0xEA60) return true;
-        // CH340 / CH341 (WCH)
-        if (vid == 0x1A86 && pid == 0x7523) return true;
-        // FT232R (FTDI)
-        if (vid == 0x0403 && pid == 0x6001) return true;
-        // ESP32-S3 native USB
-        if (vid == 0x303A && pid == 0x1001) return true;
-        return false;
     }
 
     // ── Notification ────────────────────────────────────────────────────

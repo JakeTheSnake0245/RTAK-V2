@@ -168,6 +168,102 @@ public class ReticulumBridge {
         }
     }
 
+    // ── Pre-start Interface Config (no RNS required) ──────────────────
+
+    /**
+     * Generate the RNS config file from rtak_interfaces.json.
+     * Must be called BEFORE {@link #init}.
+     *
+     * @param context                  Android context.
+     * @param detectedInterfacesJson   JSON object mapping interface names to
+     *                                 resolved device paths (for USB devices).
+     *                                 e.g. {"RNode 900MHz": "/dev/bus/usb/001/002"}
+     * @return true on success.
+     */
+    public boolean generateRnsConfig(Context context, String detectedInterfacesJson) {
+        try {
+            File configDir = new File(context.getFilesDir(), "reticulum");
+            PyObject result = bridgeModule.callAttr(
+                    "generate_rns_config",
+                    configDir.getAbsolutePath(),
+                    detectedInterfacesJson);
+            return result.toJava(Boolean.class);
+        } catch (Exception e) {
+            Log.e(TAG, "generateRnsConfig() failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * Read the raw interface configs from rtak_interfaces.json.
+     * Does NOT require RNS to be running — can be called at any time.
+     */
+    public static String readInterfaceConfigs(Context context) {
+        try {
+            Python py = Python.getInstance();
+            PyObject module = py.getModule("rtak_bridge");
+            File configDir = new File(context.getFilesDir(), "reticulum");
+            PyObject result = module.callAttr("read_interface_configs",
+                    configDir.getAbsolutePath());
+            return result.toJava(String.class);
+        } catch (Exception e) {
+            Log.e(TAG, "readInterfaceConfigs() failed", e);
+            return "[]";
+        }
+    }
+
+    /**
+     * Save an interface config to rtak_interfaces.json (pre-start CRUD).
+     * Does NOT require RNS to be running.
+     *
+     * @return The interface name on success, or null on failure.
+     */
+    public static String saveInterfaceConfig(Context context, String configJson) {
+        try {
+            Python py = Python.getInstance();
+            PyObject module = py.getModule("rtak_bridge");
+            File configDir = new File(context.getFilesDir(), "reticulum");
+            PyObject result = module.callAttr("save_interface_config",
+                    configDir.getAbsolutePath(), configJson);
+            if (result == null) return null;
+            String name = result.toJava(String.class);
+            return (name == null || name.isEmpty()) ? null : name;
+        } catch (Exception e) {
+            Log.e(TAG, "saveInterfaceConfig() failed", e);
+            return null;
+        }
+    }
+
+    /**
+     * Remove an interface config from rtak_interfaces.json by name (pre-start CRUD).
+     * Does NOT require RNS to be running.
+     */
+    public static boolean removeInterfaceConfig(Context context, String name) {
+        try {
+            Python py = Python.getInstance();
+            PyObject module = py.getModule("rtak_bridge");
+            File configDir = new File(context.getFilesDir(), "reticulum");
+            PyObject result = module.callAttr("remove_interface_config",
+                    configDir.getAbsolutePath(), name);
+            return result.toJava(Boolean.class);
+        } catch (Exception e) {
+            Log.e(TAG, "removeInterfaceConfig() failed", e);
+            return false;
+        }
+    }
+
+    /**
+     * Check whether interface configuration is locked (bridge is running).
+     */
+    public boolean isInterfacesLocked() {
+        try {
+            PyObject result = bridgeModule.callAttr("is_interfaces_locked");
+            return result.toJava(Boolean.class);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     // ── Interface Management ───────────────────────────────────────────
 
     /**

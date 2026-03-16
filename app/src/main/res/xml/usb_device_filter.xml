@@ -9,6 +9,7 @@
       CH340 (WCH)            — 0x1A86 / 0x7523
       FTDI FT232R            — 0x0403 / 0x6001
       ESP32-S3 native USB    — 0x303A / 0x1001  (newer RNode hardware)
+      RAK4630 / nRF52840     — 0x239A / 0x8029  (Adafruit BSP, RNode 1.85)
 -->
 <resources>
     <!-- Silicon Labs CP2102 / CP2104 (most RNodes) -->
@@ -22,4 +23,7 @@
 
     <!-- Espressif ESP32-S3 native USB (newer RNode builds) -->
     <usb-device vendor-id="12346" product-id="4097" />  <!-- 0x303A / 0x1001 -->
+
+    <!-- RAK4630 / nRF52840 (Adafruit BSP, RNode 1.85) -->
+    <usb-device vendor-id="9114" product-id="32809" />   <!-- 0x239A / 0x8029 -->
 </resources>
