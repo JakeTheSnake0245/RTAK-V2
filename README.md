@@ -8,31 +8,31 @@ RTAK is an Android application that serves as a *thin TAK server*, bridging Curs
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Android Device                        │
+│                    Android Device                       │
 │                                                         │
 │  ┌──────────┐    TCP :8087     ┌──────────────────────┐ │
-│  │   ATAK   │◄───────────────►│    CotTcpServer      │ │
-│  │  Client   │  CoT XML        │    (Java)            │ │
+│  │   ATAK   │◄───────────────► │    CotTcpServer      │ │
+│  │  Client  │  CoT XML         │       (Java)         │ │
 │  └──────────┘                  └──────┬───────────────┘ │
-│                                       │                  │
+│                                       │                 │
 │  ┌──────────┐                  ┌──────▼───────────────┐ │
-│  │  WinTAK  │◄──── TCP ──────►│  TakBridgeService    │ │
-│  │ (remote) │                  │  (Foreground Service) │ │
+│  │  WinTAK  │◄──── TCP ──────►│  TakBridgeService     │ │
+│  │ (remote) │                  │ (Foreground Service) │ │
 │  └──────────┘                  └──────┬───────────────┘ │
 │                                       │ Chaquopy JNI    │
 │                                ┌──────▼───────────────┐ │
 │                                │   rtak_bridge.py     │ │
 │                                │   (Python / RNS)     │ │
 │                                └──────┬───────────────┘ │
-│                                       │                  │
+│                                       │                 │
 │                                ┌──────▼───────────────┐ │
 │                                │   Reticulum 1.1.3    │ │
 │                                │   Network Stack      │ │
 │                                └──────┬───────────────┘ │
 └───────────────────────────────────────┼─────────────────┘
                                         │
-                    ┌───────────────────┼───────────────────┐
-                    │                   │                    │
+                    ┌───────────────────┼──────────────────┐
+                    │                   │                  │
               ┌─────▼─────┐     ┌──────▼──────┐    ┌───────▼───────┐
               │  RNode    │     │  WiFi/LAN   │    │   TCP Link    │
               │  (LoRa)   │     │ AutoIface   │    │   to Remote   │
