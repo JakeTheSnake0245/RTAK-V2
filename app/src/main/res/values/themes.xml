@@ -1,9 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.RTAKBridge" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
-        <item name="colorPrimary">#FB8016</item>
-        <item name="colorPrimaryDark">#BF6000</item>
-        <item name="colorAccent">#FB8016</item>
-        <item name="android:statusBarColor">#BF6000</item>
+        <item name="colorPrimary">@color/rtak_red_primary</item>
+        <item name="colorPrimaryVariant">@color/rtak_red_primary_dark</item>
+        <item name="colorPrimaryDark">@color/rtak_red_primary_dark</item>
+        <item name="colorSecondary">@color/rtak_red_accent</item>
+        <item name="colorSecondaryVariant">@color/rtak_red_primary</item>
+        <item name="colorAccent">@color/rtak_red_accent</item>
+        <item name="colorSurface">@color/rtak_surface</item>
+        <item name="colorError">@color/status_error</item>
+        <item name="colorOnPrimary">@color/rtak_text_primary</item>
+        <item name="colorOnSecondary">@color/rtak_text_primary</item>
+        <item name="colorOnSurface">@color/rtak_text_primary</item>
+        <item name="colorOnBackground">@color/rtak_text_primary</item>
+        <item name="android:colorBackground">@color/rtak_bg</item>
+        <item name="android:textColorPrimary">@color/rtak_text_primary</item>
+        <item name="android:textColorSecondary">@color/rtak_text_secondary</item>
+        <item name="android:windowBackground">@color/rtak_bg</item>
+        <item name="android:statusBarColor">@color/rtak_red_primary_dark</item>
+        <item name="android:navigationBarColor">@color/rtak_bg</item>
     </style>
 </resources>

@@ -3,7 +3,8 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:fillViewport="true"
+    android:background="@color/rtak_bg">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -18,6 +19,7 @@
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            app:cardBackgroundColor="?attr/colorSurface"
             app:cardCornerRadius="8dp"
             app:cardElevation="2dp"
             android:layout_marginBottom="12dp">
@@ -107,6 +109,7 @@
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            app:cardBackgroundColor="?attr/colorSurface"
             app:cardCornerRadius="8dp"
             app:cardElevation="2dp"
             android:layout_marginBottom="12dp">
@@ -193,6 +196,7 @@
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            app:cardBackgroundColor="?attr/colorSurface"
             app:cardCornerRadius="8dp"
             app:cardElevation="2dp"
             android:layout_marginBottom="12dp">
@@ -249,6 +253,7 @@
         <androidx.cardview.widget.CardView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            app:cardBackgroundColor="?attr/colorSurface"
             app:cardCornerRadius="8dp"
             app:cardElevation="2dp"
             android:layout_marginBottom="12dp">
@@ -415,7 +420,7 @@
             android:id="@+id/scroll_log"
             android:layout_width="match_parent"
             android:layout_height="200dp"
-            android:background="#0A000000"
+            android:background="@color/rtak_surface_alt"
             android:padding="8dp">
 
             <TextView

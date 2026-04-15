@@ -5,7 +5,6 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
-import android.graphics.Color;
 import android.hardware.usb.UsbManager;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -25,6 +24,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.ContextCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -943,15 +943,20 @@ public class InterfacesActivity extends AppCompatActivity {
                 // When locked (running): show online/offline status
                 h.itemView.setAlpha(item.disconnected ? 0.5f : 1.0f);
                 h.statusDot.setBackgroundColor(
-                        item.disconnected ? Color.RED   :
-                        item.online       ? Color.GREEN : Color.GRAY);
+                        item.disconnected
+                                ? ContextCompat.getColor(InterfacesActivity.this, R.color.status_error)
+                                : item.online
+                                        ? ContextCompat.getColor(InterfacesActivity.this, R.color.status_running)
+                                        : ContextCompat.getColor(InterfacesActivity.this, R.color.status_disabled));
             } else {
                 // When unlocked (pre-start): show detection status
                 h.itemView.setAlpha(!item.enabled ? 0.5f : 1.0f);
                 h.statusDot.setBackgroundColor(
-                        !item.enabled ? Color.DKGRAY                   :
-                        item.detected ? Color.GREEN                     :
-                                        Color.parseColor("#FFC107")); // amber
+                        !item.enabled
+                                ? ContextCompat.getColor(InterfacesActivity.this, R.color.status_disabled)
+                                : item.detected
+                                        ? ContextCompat.getColor(InterfacesActivity.this, R.color.status_running)
+                                        : ContextCompat.getColor(InterfacesActivity.this, R.color.status_warning));
             }
 
             // Remove button: only visible when unlocked

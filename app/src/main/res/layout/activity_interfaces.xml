@@ -3,7 +3,8 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@color/rtak_bg">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -14,7 +15,7 @@
             android:id="@+id/tv_locked_banner"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="#F44336"
+            android:background="@color/rtak_red_primary"
             android:textColor="@android:color/white"
             android:padding="12dp"
             android:gravity="center"
@@ -38,6 +39,8 @@
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
         android:contentDescription="Add interface"
+        app:backgroundTint="@color/rtak_red_accent"
+        app:tint="@color/rtak_text_primary"
         app:srcCompat="@android:drawable/ic_input_add" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

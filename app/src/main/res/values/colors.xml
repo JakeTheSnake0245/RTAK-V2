@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="rtak_bg">#111315</color>
+    <color name="rtak_surface">#1B1F1D</color>
+    <color name="rtak_surface_alt">#242A27</color>
+    <color name="rtak_red_primary">#3E4741</color>
+    <color name="rtak_red_primary_dark">#2A312D</color>
+    <color name="rtak_red_accent">#5F3638</color>
+    <color name="rtak_text_primary">#E3E6E1</color>
+    <color name="rtak_text_secondary">#9AA39C</color>
+
+    <color name="status_running">#66785D</color>
+    <color name="status_warning">#8A7A4C</color>
+    <color name="status_disabled">#5D645E</color>
+    <color name="status_error">#7A4B4E</color>
+</resources>

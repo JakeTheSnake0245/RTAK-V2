@@ -8,7 +8,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -230,9 +229,15 @@ public class MainActivity extends AppCompatActivity {
 
         int stateColor;
         switch (s.bridgeState) {
-            case "RUNNING": stateColor = 0xFFFB8016; break;  // orange
-            case "ERROR":   stateColor = 0xFFF44336; break;  // red
-            default:        stateColor = 0xFFFF9800; break;  // orange
+            case "RUNNING":
+                stateColor = ContextCompat.getColor(this, R.color.rtak_red_accent);
+                break;
+            case "ERROR":
+                stateColor = ContextCompat.getColor(this, R.color.status_error);
+                break;
+            default:
+                stateColor = ContextCompat.getColor(this, R.color.rtak_text_secondary);
+                break;
         }
         tvBridgeState.setTextColor(stateColor);
 
@@ -493,13 +498,13 @@ public class MainActivity extends AppCompatActivity {
             // Color: green = online/detected+enabled, amber = enabled+not detected, gray = disabled
             int dotColor;
             if (item.online) {
-                dotColor = Color.parseColor("#4CAF50"); // green (running)
+                dotColor = ContextCompat.getColor(h.itemView.getContext(), R.color.status_running);
             } else if (!item.enabled) {
-                dotColor = Color.GRAY; // disabled
+                dotColor = ContextCompat.getColor(h.itemView.getContext(), R.color.status_disabled);
             } else if (item.detected) {
-                dotColor = Color.parseColor("#4CAF50"); // green (detected, ready)
+                dotColor = ContextCompat.getColor(h.itemView.getContext(), R.color.status_running);
             } else {
-                dotColor = Color.parseColor("#FFC107"); // amber (not detected)
+                dotColor = ContextCompat.getColor(h.itemView.getContext(), R.color.status_warning);
             }
             h.dot.setBackgroundColor(dotColor);
 
