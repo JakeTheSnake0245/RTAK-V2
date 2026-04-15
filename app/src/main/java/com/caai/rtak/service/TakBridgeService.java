@@ -20,15 +20,16 @@ import android.util.Log;
 import androidx.core.app.NotificationCompat;
 import androidx.lifecycle.MutableLiveData;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
+import com.caai.rtak.AppSettings;
 import com.caai.rtak.R;
 import com.caai.rtak.RTAKApplication;
 import com.caai.rtak.RTAKCallback;
 import com.caai.rtak.ReticulumBridge;
 import com.caai.rtak.model.BridgeStatus;
 import com.caai.rtak.ui.MainActivity;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -48,32 +49,27 @@ import java.util.concurrent.TimeUnit;
  *   <li>The <b>Reticulum bridge</b> (Python via Chaquopy).</li>
  * </ol>
  * <p>
- * CoT events arriving from TAK clients → forwarded to all Reticulum peers.
- * CoT events arriving from Reticulum   → forwarded to all TAK clients.
+ * CoT events arriving from TAK clients are forwarded to all Reticulum peers.
+ * CoT events arriving from Reticulum are forwarded to all TAK clients.
  */
 public class TakBridgeService extends Service implements RTAKCallback,
         CotTcpServer.CotListener {
 
     private static final String TAG = "TakBridgeService";
-    private static final int NOTIFICATION_ID            = 1;
+    private static final int NOTIFICATION_ID = 1;
     private static final int DISCONNECT_NOTIFICATION_ID = 2;
-    private static final int TAK_PORT = 8087;
+    private static final long HEARTBEAT_INTERVAL_MS = 10_000;
 
-    static final String ACTION_USB_PERMISSION =
-            "com.caai.rtak.USB_PERMISSION";
+    static final String ACTION_USB_PERMISSION = "com.caai.rtak.USB_PERMISSION";
 
     /** Intent action: start the bridge (as opposed to just starting the detection service). */
-    public static final String ACTION_START_BRIDGE =
-            "com.caai.rtak.START_BRIDGE";
+    public static final String ACTION_START_BRIDGE = "com.caai.rtak.START_BRIDGE";
 
-    // ── Public observable state ─────────────────────────────────────────
     public static final MutableLiveData<BridgeStatus> statusLive =
             new MutableLiveData<>(new BridgeStatus());
-    public static final MutableLiveData<String> logLive =
-            new MutableLiveData<>();
+    public static final MutableLiveData<String> logLive = new MutableLiveData<>();
     /** Fires whenever a managed interface is added, removed, or changes state. */
-    public static final MutableLiveData<String[]> interfaceEventLive =
-            new MutableLiveData<>();
+    public static final MutableLiveData<String[]> interfaceEventLive = new MutableLiveData<>();
     /** Whether interface configuration is locked (bridge has been started). */
     public static final MutableLiveData<Boolean> interfacesLockedLive =
             new MutableLiveData<>(false);
@@ -81,7 +77,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
     public static final MutableLiveData<List<InterfaceDetector.DetectedInterface>>
             detectedInterfacesLive = new MutableLiveData<>();
 
-    // ── Internal components ─────────────────────────────────────────────
     private ReticulumBridge bridge;
     private CotTcpServer tcpServer;
     private PowerManager.WakeLock wakeLock;
@@ -90,6 +85,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private InterfaceDetector interfaceDetector;
     private volatile boolean interfacesLocked = false;
     private volatile CountDownLatch usbPermissionLatch = null;
+    private int takPort = 8087;
 
     private final ExecutorService bgExecutor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -97,21 +93,16 @@ public class TakBridgeService extends Service implements RTAKCallback,
 
     private volatile boolean serviceRunning = false;
 
-    // ── Statistics ──────────────────────────────────────────────────────
     private int cotFromTak = 0;
     private int cotFromRns = 0;
     private int cotToTak = 0;
     private int cotToRns = 0;
 
-    // ── SA Cache (for fast pairing) ─────────────────────────────────────
-    private final ConcurrentHashMap<String, String> localSaCache  = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> localSaCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> remoteSaCache = new ConcurrentHashMap<>();
 
-    // ── Heartbeat ────────────────────────────────────────────────────────
-    private static final long HEARTBEAT_INTERVAL_MS = 10_000; // 10 seconds — must be below ATAK's data-reception timeout
     private ScheduledExecutorService heartbeatScheduler;
 
-    // ── Binder ──────────────────────────────────────────────────────────
     public class LocalBinder extends Binder {
         public TakBridgeService getService() {
             return TakBridgeService.this;
@@ -123,34 +114,32 @@ public class TakBridgeService extends Service implements RTAKCallback,
         return binder;
     }
 
-    // ── Service Lifecycle ───────────────────────────────────────────────
-
     @Override
     public void onCreate() {
         super.onCreate();
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         registerUsbReceiver();
+        takPort = AppSettings.getTakPort(this);
 
-        // Start the interface detection loop (scans for configured hardware)
         String configDir = new File(getFilesDir(), "reticulum").getAbsolutePath();
         interfaceDetector = new InterfaceDetector(this, configDir, detectedInterfacesLive);
         interfaceDetector.start();
 
-        Log.i(TAG, "Service created — interface detection active");
+        Log.i(TAG, "Service created - interface detection active");
     }
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (!serviceRunning) {
             serviceRunning = true;
-            startForeground(NOTIFICATION_ID,
-                    buildNotification("Ready — configure interfaces, then start bridge"));
+            startForeground(
+                    NOTIFICATION_ID,
+                    buildNotification("Ready - configure interfaces, then start bridge"));
             acquireWakeLock();
         }
 
-        // Only start the bridge if explicitly requested via ACTION_START_BRIDGE
         if (intent != null && ACTION_START_BRIDGE.equals(intent.getAction())) {
-            if (bridge == null) {   // allow restart after stop
+            if (bridge == null) {
                 startBridge();
             }
         }
@@ -163,11 +152,19 @@ public class TakBridgeService extends Service implements RTAKCallback,
         super.onDestroy();
         serviceRunning = false;
 
-        if (interfaceDetector != null) interfaceDetector.stop();
+        if (interfaceDetector != null) {
+            interfaceDetector.stop();
+        }
         unregisterUsbReceiver();
-        if (heartbeatScheduler != null) heartbeatScheduler.shutdownNow();
-        if (tcpServer != null) tcpServer.stop();
-        if (bridge != null) bridge.shutdown();
+        if (heartbeatScheduler != null) {
+            heartbeatScheduler.shutdownNow();
+        }
+        if (tcpServer != null) {
+            tcpServer.stop();
+        }
+        if (bridge != null) {
+            bridge.shutdown();
+        }
         bgExecutor.shutdownNow();
         releaseWakeLock();
 
@@ -179,44 +176,38 @@ public class TakBridgeService extends Service implements RTAKCallback,
         Log.i(TAG, "Service destroyed");
     }
 
-    // ── Initialisation ──────────────────────────────────────────────────
-
     private void startBridge() {
         bgExecutor.submit(() -> {
             try {
-                // 1. Stop the detection loop (no longer needed once bridge starts)
                 if (interfaceDetector != null) {
                     interfaceDetector.stop();
                 }
 
-                // 2. Do one final fresh scan for latest device paths
                 if (interfaceDetector != null) {
                     interfaceDetector.scanNow();
-                    // Brief pause to let the final scan complete
-                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
 
-                // 3. Build the detected-interfaces map (name → device path)
                 JSONObject detectedMap = (interfaceDetector != null)
                         ? interfaceDetector.buildDetectedMap()
                         : new JSONObject();
 
-                // 3.5 Ensure USB permissions are granted before RNS opens any serial device
                 checkAndRequestUsbPermissionsSync(detectedMap);
 
-                // 4. Generate the RNS config file from JSON interface configs
                 bridge = new ReticulumBridge();
                 boolean configOk = bridge.generateRnsConfig(
                         getApplicationContext(), detectedMap.toString());
                 if (!configOk) {
-                    postLog("WARNING: RNS config generation failed — using defaults");
+                    postLog("WARNING: RNS config generation failed - using defaults");
                 }
 
-                // 5. Lock interfaces BEFORE init
                 interfacesLocked = true;
                 mainHandler.post(() -> interfacesLockedLive.setValue(true));
 
-                // 6. Start the Reticulum bridge (reads the generated config)
                 String destHash = bridge.init(getApplicationContext(), this);
 
                 if (destHash != null) {
@@ -225,28 +216,25 @@ public class TakBridgeService extends Service implements RTAKCallback,
                         s.bridgeState = "RUNNING";
                         s.destinationHash = destHash;
                     });
-
-                    // Send initial announce
                     bridge.announce("RTAK Bridge");
                 } else {
                     postLog("ERROR: Reticulum init failed");
                     updateStatus(s -> s.bridgeState = "ERROR");
                 }
 
-                // 7. Start the TCP TAK server
-                tcpServer = new CotTcpServer(TAK_PORT, this);
+                tcpServer = new CotTcpServer(takPort, this);
                 tcpServer.start();
-                postLog("TAK TCP server started on port " + TAK_PORT);
+                postLog("TAK TCP server started on port " + takPort);
                 updateStatus(s -> {
                     s.takServerRunning = true;
-                    s.takServerPort = TAK_PORT;
+                    s.takServerPort = takPort;
                 });
 
-                // 8. Start heartbeat to keep ATAK connections alive
                 heartbeatScheduler = Executors.newSingleThreadScheduledExecutor();
                 heartbeatScheduler.scheduleAtFixedRate(() -> {
                     if (tcpServer != null && tcpServer.isRunning()
-                            && tcpServer.getConnectedClientCount() > 0 && bridge != null) {
+                            && tcpServer.getConnectedClientCount() > 0
+                            && bridge != null) {
                         String ping = bridge.buildPing();
                         if (ping != null) {
                             tcpServer.broadcastToClients(ping);
@@ -254,7 +242,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
                     }
                 }, HEARTBEAT_INTERVAL_MS, HEARTBEAT_INTERVAL_MS, TimeUnit.MILLISECONDS);
 
-                updateNotification("Running • TAK:" + TAK_PORT);
+                updateNotification("Running - TAK:" + takPort);
 
             } catch (Exception e) {
                 Log.e(TAG, "Bridge start failed", e);
@@ -264,20 +252,18 @@ public class TakBridgeService extends Service implements RTAKCallback,
         });
     }
 
-    // ── RTAKCallback (from Python/Reticulum) ────────────────────────────
-
     @Override
     public void onCotReceived(String cotXml, String senderHash) {
         cotFromRns++;
-        postLog("← RNS CoT from " + shortenHash(senderHash));
+        postLog("RNS CoT from " + shortenHash(senderHash));
 
-        // Cache SA events for fast replay to new ATAK clients
         if (isSaEvent(cotXml)) {
             String uid = extractCotUid(cotXml);
-            if (uid != null) remoteSaCache.put(uid, cotXml);
+            if (uid != null) {
+                remoteSaCache.put(uid, cotXml);
+            }
         }
 
-        // Forward to all connected TAK clients
         if (tcpServer != null) {
             tcpServer.broadcastToClients(cotXml);
             cotToTak++;
@@ -291,7 +277,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
         postLog("RNS peer connected: " + shortenHash(peerHash));
         updateStatus(s -> s.rnsPeers++);
 
-        // Send cached ATAK positions so remote peer sees us immediately
         if (bridge != null && !localSaCache.isEmpty()) {
             bgExecutor.submit(() -> {
                 for (String sa : localSaCache.values()) {
@@ -305,13 +290,17 @@ public class TakBridgeService extends Service implements RTAKCallback,
     @Override
     public void onPeerDisconnected(String peerHash) {
         postLog("RNS peer disconnected: " + shortenHash(peerHash));
-        updateStatus(s -> { if (s.rnsPeers > 0) s.rnsPeers--; });
+        updateStatus(s -> {
+            if (s.rnsPeers > 0) {
+                s.rnsPeers--;
+            }
+        });
     }
 
     @Override
     public void onPeerAnnounced(String destHash, String appData) {
-        postLog("RNS announce from " + shortenHash(destHash) +
-                (appData.isEmpty() ? "" : " (" + appData + ")"));
+        postLog("RNS announce from " + shortenHash(destHash)
+                + (appData.isEmpty() ? "" : " (" + appData + ")"));
     }
 
     @Override
@@ -329,31 +318,27 @@ public class TakBridgeService extends Service implements RTAKCallback,
         mainHandler.post(() -> interfaceEventLive.setValue(new String[]{name, event}));
     }
 
-    // ── CotTcpServer.CotListener (from TAK clients) ────────────────────
-
     @Override
     public void onCotFromClient(String cotXml, String clientId) {
         cotFromTak++;
 
-        // Don't forward system/ping events to Reticulum
         if (cotXml.contains("\"t-x-c-t\"") || cotXml.contains("\"t-x-c-t-r\"")) {
             return;
         }
 
-        postLog("→ TAK CoT from " + clientId);
+        postLog("TAK CoT from " + clientId);
 
-        // Cache SA events for fast replay to new RNS peers
         if (isSaEvent(cotXml)) {
             String uid = extractCotUid(cotXml);
-            if (uid != null) localSaCache.put(uid, cotXml);
+            if (uid != null) {
+                localSaCache.put(uid, cotXml);
+            }
         }
 
-        // Echo to all TAK clients (TAK server relay behavior)
         if (tcpServer != null) {
             tcpServer.broadcastToClients(cotXml);
         }
 
-        // Forward to all Reticulum peers
         if (bridge != null && bridge.isInitialised()) {
             bgExecutor.submit(() -> {
                 bridge.broadcastCot(cotXml);
@@ -367,11 +352,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
     public void onClientConnected(String clientId) {
         postLog("TAK client connected: " + clientId);
         updateStatus(s -> s.takClients++);
-        updateNotification("TAK:" + TAK_PORT +
-                " | Clients:" + tcpServer.getConnectedClientCount());
+        updateNotification("TAK:" + takPort
+                + " | Clients:" + tcpServer.getConnectedClientCount());
 
-        // Send an immediate ping so ATAK doesn't hit its data-reception timeout
-        // before the first scheduled 30-second heartbeat arrives.
         if (bridge != null) {
             String ping = bridge.buildPing();
             if (ping != null) {
@@ -379,7 +362,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
             }
         }
 
-        // Send cached RNS peer positions so ATAK sees peers immediately
         if (!remoteSaCache.isEmpty()) {
             for (String sa : remoteSaCache.values()) {
                 tcpServer.sendToClient(clientId, sa);
@@ -391,18 +373,16 @@ public class TakBridgeService extends Service implements RTAKCallback,
     @Override
     public void onClientDisconnected(String clientId) {
         postLog("TAK client disconnected: " + clientId);
-        updateStatus(s -> { if (s.takClients > 0) s.takClients--; });
+        updateStatus(s -> {
+            if (s.takClients > 0) {
+                s.takClients--;
+            }
+        });
     }
-
-    // ── Public API ──────────────────────────────────────────────────────
 
     /**
      * Stop only the Python bridge (TCP server + RNS) while keeping the
-     * Android foreground service alive.  Runs on the background executor
-     * so it never blocks the main thread.
-     * <p>
-     * <b>Note:</b> Interfaces remain locked after stopping.  The user must
-     * close and restart the app to modify interface configurations.
+     * Android foreground service alive.
      */
     public void stopBridgeAsync() {
         bgExecutor.submit(() -> {
@@ -424,14 +404,10 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 s.takClients = 0;
                 s.rnsPeers = 0;
             });
-            // Interfaces remain locked — do NOT set interfacesLocked = false
-            updateNotification("Stopped — tap Start Bridge to restart");
+            updateNotification("Stopped - tap Start Bridge to restart");
         });
     }
 
-    /**
-     * Send an announce on the Reticulum network.
-     */
     public void sendAnnounce() {
         if (bridge != null) {
             bgExecutor.submit(() -> {
@@ -441,15 +417,13 @@ public class TakBridgeService extends Service implements RTAKCallback,
         }
     }
 
-    /**
-     * Connect to a remote RTAK peer by destination hash.
-     */
     public void connectPeer(String destHashHex) {
         if (bridge != null) {
             bgExecutor.submit(() -> {
                 boolean ok = bridge.connectToPeer(destHashHex);
-                postLog(ok ? "Connecting to " + shortenHash(destHashHex) + "…"
-                           : "Connect failed for " + shortenHash(destHashHex));
+                postLog(ok
+                        ? "Connecting to " + shortenHash(destHashHex) + "..."
+                        : "Connect failed for " + shortenHash(destHashHex));
             });
         }
     }
@@ -460,7 +434,7 @@ public class TakBridgeService extends Service implements RTAKCallback,
 
     private static final String LOCKED_MSG =
             "Interface configuration is locked while RTAK is running. "
-            + "Close and restart the app to modify interfaces.";
+                    + "Close and restart the app to modify interfaces.";
 
     /**
      * Save a new interface config to the JSON registry.
@@ -479,7 +453,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 postLog("Interface saved: " + name);
                 mainHandler.post(() -> interfaceEventLive.setValue(
                         new String[]{name, "ADDED"}));
-                if (interfaceDetector != null) interfaceDetector.scanNow();
+                if (interfaceDetector != null) {
+                    interfaceDetector.scanNow();
+                }
             } else {
                 postLog("ERROR: Failed to save interface");
                 mainHandler.post(() -> android.widget.Toast.makeText(this,
@@ -503,20 +479,20 @@ public class TakBridgeService extends Service implements RTAKCallback,
             boolean ok = ReticulumBridge.removeInterfaceConfig(
                     getApplicationContext(), name);
             postLog(ok ? "Interface removed: " + name
-                       : "ERROR: Failed to remove interface: " + name);
+                    : "ERROR: Failed to remove interface: " + name);
             if (ok) {
                 mainHandler.post(() -> interfaceEventLive.setValue(
                         new String[]{name, "REMOVED"}));
-                if (interfaceDetector != null) interfaceDetector.scanNow();
+                if (interfaceDetector != null) {
+                    interfaceDetector.scanNow();
+                }
             }
         });
     }
 
     /**
-     * Return a JSON array of all RNS interfaces (for the UI to display).
-     * When bridge is running, returns live interface status.
-     * When bridge is NOT running, returns persisted configs from the registry.
-     * Runs synchronously — call from a background thread.
+     * Return a JSON array of all RNS interfaces for the UI to display.
+     * Runs synchronously; call from a background thread.
      */
     public String listInterfacesJson() {
         if (bridge != null && bridge.isInitialised()) {
@@ -542,7 +518,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 postLog("Interface updated: " + name);
                 mainHandler.post(() -> interfaceEventLive.setValue(
                         new String[]{name, "UPDATED"}));
-                if (interfaceDetector != null) interfaceDetector.scanNow();
+                if (interfaceDetector != null) {
+                    interfaceDetector.scanNow();
+                }
             } else {
                 postLog("ERROR: Failed to update interface");
             }
@@ -552,7 +530,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
     /**
      * Rename an existing interface config in the JSON registry.
      * The newConfigJson entry may carry a different name than oldName.
-     * Only allowed when the bridge has NOT been started.
      */
     public void renameInterface(String oldName, String newConfigJson) {
         if (interfacesLocked) {
@@ -567,7 +544,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
                 postLog("Interface renamed: " + oldName + " -> " + newName);
                 mainHandler.post(() -> interfaceEventLive.setValue(
                         new String[]{newName, "UPDATED"}));
-                if (interfaceDetector != null) interfaceDetector.scanNow();
+                if (interfaceDetector != null) {
+                    interfaceDetector.scanNow();
+                }
             } else {
                 postLog("ERROR: Failed to rename interface: " + oldName);
                 mainHandler.post(() -> android.widget.Toast.makeText(this,
@@ -587,7 +566,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
                     LOCKED_MSG, android.widget.Toast.LENGTH_LONG).show());
             return;
         }
-        // Read the current config, toggle enabled, write back
         bgExecutor.submit(() -> {
             try {
                 String json = ReticulumBridge.readInterfaceConfigs(
@@ -604,7 +582,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
                                     + ": " + name);
                             mainHandler.post(() -> interfaceEventLive.setValue(
                                     new String[]{name, enabled ? "ENABLED" : "DISABLED"}));
-                            if (interfaceDetector != null) interfaceDetector.scanNow();
+                            if (interfaceDetector != null) {
+                                interfaceDetector.scanNow();
+                            }
                         }
                         return;
                     }
@@ -621,25 +601,23 @@ public class TakBridgeService extends Service implements RTAKCallback,
         return interfacesLocked;
     }
 
-    // ── USB Device Detection ─────────────────────────────────────────────
-    // USB events now only trigger detection scans (no auto-add behaviour).
-    // The InterfaceDetector handles matching against configured interfaces.
-
     /**
      * Checks USB permission for every device path in {@code detectedMap} and
-     * requests permission for any that lack it.  Blocks the calling (background)
-     * thread until all pending permission dialogs are resolved or a 30-second
-     * timeout expires.  Safe to call from a non-main thread.
+     * requests permission for any that lack it.
      */
     private void checkAndRequestUsbPermissionsSync(JSONObject detectedMap) {
         Map<String, UsbDevice> usbDevices = usbManager.getDeviceList();
 
         List<UsbDevice> needPermission = new ArrayList<>();
         try {
-            for (int i = 0; i < (detectedMap.names() != null ? detectedMap.names().length() : 0); i++) {
-                String name = detectedMap.names().getString(i);
+            JSONArray names = detectedMap.names();
+            int length = names != null ? names.length() : 0;
+            for (int i = 0; i < length; i++) {
+                String name = names.getString(i);
                 Object pathObj = detectedMap.get(name);
-                if (pathObj == null || pathObj == JSONObject.NULL) continue;
+                if (pathObj == null || pathObj == JSONObject.NULL) {
+                    continue;
+                }
                 String devicePath = pathObj.toString();
 
                 UsbDevice device = usbDevices.get(devicePath);
@@ -651,14 +629,17 @@ public class TakBridgeService extends Service implements RTAKCallback,
             Log.w(TAG, "checkAndRequestUsbPermissionsSync: " + e.getMessage());
         }
 
-        if (needPermission.isEmpty()) return;
+        if (needPermission.isEmpty()) {
+            return;
+        }
 
-        postLog("Requesting USB permission for " + needPermission.size() + " device(s)…");
+        postLog("Requesting USB permission for " + needPermission.size() + " device(s)...");
         usbPermissionLatch = new CountDownLatch(needPermission.size());
 
         for (UsbDevice device : needPermission) {
             PendingIntent pi = PendingIntent.getBroadcast(
-                    this, 0,
+                    this,
+                    0,
                     new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()),
                     PendingIntent.FLAG_MUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
             usbManager.requestPermission(device, pi);
@@ -680,7 +661,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
             public void onReceive(Context context, Intent intent) {
                 String action = intent.getAction();
                 UsbDevice device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                if (device == null) return;
+                if (device == null) {
+                    return;
+                }
 
                 if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(action)) {
                     postLog("USB device attached: " + String.format(
@@ -694,7 +677,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
                     if (!interfacesLocked && interfaceDetector != null) {
                         interfaceDetector.scanNow();
                     }
-                    // When locked, RNS handles the disconnect internally
                 } else if (ACTION_USB_PERMISSION.equals(action)) {
                     boolean granted = intent.getBooleanExtra(
                             UsbManager.EXTRA_PERMISSION_GRANTED, false);
@@ -706,9 +688,11 @@ public class TakBridgeService extends Service implements RTAKCallback,
                     } else {
                         postLog("USB permission denied for: " + device.getDeviceName());
                     }
-                    // Release the latch if a pre-start permission check is waiting
+
                     CountDownLatch latch = usbPermissionLatch;
-                    if (latch != null) latch.countDown();
+                    if (latch != null) {
+                        latch.countDown();
+                    }
                 }
             }
         };
@@ -729,19 +713,19 @@ public class TakBridgeService extends Service implements RTAKCallback,
         if (usbReceiver != null) {
             try {
                 unregisterReceiver(usbReceiver);
-            } catch (IllegalArgumentException e) {
-                // Already unregistered
+            } catch (IllegalArgumentException ignored) {
+                // Already unregistered.
             }
             usbReceiver = null;
         }
     }
 
-    // ── Notification ────────────────────────────────────────────────────
-
     private Notification buildNotification(String text) {
         Intent notifIntent = new Intent(this, MainActivity.class);
         PendingIntent pendingIntent = PendingIntent.getActivity(
-                this, 0, notifIntent,
+                this,
+                0,
+                notifIntent,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
         );
 
@@ -757,12 +741,16 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private void postDisconnectNotification(String name) {
         try {
             Intent intent = new Intent(this, MainActivity.class);
-            PendingIntent pi = PendingIntent.getActivity(this, 0, intent,
+            PendingIntent pi = PendingIntent.getActivity(
+                    this,
+                    0,
+                    intent,
                     PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
             android.app.NotificationManager nm =
                     (android.app.NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (nm != null) {
-                nm.notify(DISCONNECT_NOTIFICATION_ID,
+                nm.notify(
+                        DISCONNECT_NOTIFICATION_ID,
                         new NotificationCompat.Builder(this, RTAKApplication.CHANNEL_ID)
                                 .setContentTitle("Interface Disconnected")
                                 .setContentText(name + " was unplugged")
@@ -771,7 +759,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
                                 .setAutoCancel(true)
                                 .build());
             }
-        } catch (Exception e) { /* ignore */ }
+        } catch (Exception ignored) {
+            // Ignore notification failures.
+        }
     }
 
     private void updateNotification(String text) {
@@ -781,19 +771,16 @@ public class TakBridgeService extends Service implements RTAKCallback,
             if (nm != null) {
                 nm.notify(NOTIFICATION_ID, buildNotification(text));
             }
-        } catch (Exception e) {
-            // Ignore
+        } catch (Exception ignored) {
+            // Ignore notification failures.
         }
     }
-
-    // ── Wake Lock ───────────────────────────────────────────────────────
 
     private void acquireWakeLock() {
         PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
         if (pm != null) {
-            wakeLock = pm.newWakeLock(
-                    PowerManager.PARTIAL_WAKE_LOCK, "rtak:bridge");
-            wakeLock.acquire(24 * 60 * 60 * 1000L); // 24 hours max
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "rtak:bridge");
+            wakeLock.acquire(24 * 60 * 60 * 1000L);
         }
     }
 
@@ -802,8 +789,6 @@ public class TakBridgeService extends Service implements RTAKCallback,
             wakeLock.release();
         }
     }
-
-    // ── Helpers ──────────────────────────────────────────────────────────
 
     private void postLog(String msg) {
         mainHandler.post(() -> logLive.setValue(msg));
@@ -816,7 +801,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
     private void updateStatus(StatusUpdater updater) {
         mainHandler.post(() -> {
             BridgeStatus s = statusLive.getValue();
-            if (s == null) s = new BridgeStatus();
+            if (s == null) {
+                s = new BridgeStatus();
+            }
             updater.update(s);
             statusLive.setValue(s);
         });
@@ -832,8 +819,10 @@ public class TakBridgeService extends Service implements RTAKCallback,
     }
 
     private static String shortenHash(String hash) {
-        if (hash == null || hash.isEmpty()) return "unknown";
-        return hash.length() > 16 ? hash.substring(0, 16) + "…" : hash;
+        if (hash == null || hash.isEmpty()) {
+            return "unknown";
+        }
+        return hash.length() > 16 ? hash.substring(0, 16) + "..." : hash;
     }
 
     private static boolean isSaEvent(String cotXml) {
@@ -842,7 +831,9 @@ public class TakBridgeService extends Service implements RTAKCallback,
 
     private static String extractCotUid(String cotXml) {
         int i = cotXml.indexOf("uid=\"");
-        if (i < 0) return null;
+        if (i < 0) {
+            return null;
+        }
         int start = i + 5;
         int end = cotXml.indexOf('"', start);
         return (end > start) ? cotXml.substring(start, end) : null;

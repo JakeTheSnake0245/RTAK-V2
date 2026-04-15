@@ -1134,8 +1134,11 @@ def generate_rns_config(config_dir, detected_interfaces_json=None):
             interfaces_lines.append(f"    enabled = Yes")
 
             for key, value in config.items():
-                # Write each config value
-                interfaces_lines.append(f"    {key} = {value}")
+                if isinstance(value, (int, float, bool)):
+                    rendered = str(value)
+                else:
+                    rendered = json.dumps(str(value))
+                interfaces_lines.append(f"    {key} = {rendered}")
 
             interfaces_lines.append("")  # blank line between interfaces
 

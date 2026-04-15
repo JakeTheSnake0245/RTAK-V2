@@ -23,7 +23,7 @@ rtak-bridge/
 ├── settings.gradle                    # Centralized repositories + Chaquopy maven
 ├── gradle.properties
 ├── app/
-│   ├── build.gradle                   # Android config, Chaquopy Python 3.12, rnspure
+│   ├── build.gradle                   # Android config, Chaquopy Python 3.13, rnspure
 │   └── src/main/
 │       ├── AndroidManifest.xml
 │       ├── java/com/rtak/bridge/
@@ -181,20 +181,20 @@ RNS `AutoInterface` calls `socket.if_nametoindex()` which is unavailable in Andr
 
 ### Cryptography
 
-The `cryptography` C-extension library has no Chaquopy wheels for Python 3.12. `rnspure` includes pure-Python fallbacks for X25519, Ed25519, AES-128, and HKDF, so the `cryptography` package is intentionally excluded from pip dependencies.
+The `cryptography` C-extension library has no Chaquopy wheels for this project's pinned Python version. `rnspure` includes pure-Python fallbacks for X25519, Ed25519, AES-128, and HKDF, so the `cryptography` package is intentionally excluded from pip dependencies.
 
 ### Python Version
 
-Python 3.13 removed the `cgi` module (PEP 594) which Chaquopy's bundled pip depends on. The project is pinned to Python 3.12.
+The project is pinned to Python 3.13 and relies on Chaquopy 16's compatible tooling.
 
 ### ABIs
 
-Only 64-bit ABIs are included: `arm64-v8a` (physical devices) and `x86_64` (emulator). This reduces APK size. The `buildPython` path in `app/build.gradle` currently points to a Windows Python 3.12 install and must be adjusted per developer machine.
+Only 64-bit ABIs are included: `arm64-v8a` (physical devices) and `x86_64` (emulator). This reduces APK size. Chaquopy auto-detects a matching Python 3.13 interpreter on the build machine.
 
 ## Build Configuration
 
 - **Gradle**: Modern `plugins {}` DSL, repositories centralized in `settings.gradle`
-- **Chaquopy**: Version 15.0.1, Python 3.12, single pip dependency `rnspure==1.1.3`
+- **Chaquopy**: Version 16.0.0, Python 3.13, pip dependencies `rnspure==1.1.3` and `usbserial4a==0.4.0`
 - **Min SDK**: 24 (Android 7.0)
 - **Target SDK**: 34
 - **Java**: 17 source/target compatibility
@@ -205,7 +205,7 @@ Only 64-bit ABIs are included: `arm64-v8a` (physical devices) and `x86_64` (emul
 - **No message acknowledgement**: The fragmentation protocol has no ACK/retransmit. Lost fragments result in a dropped message after 15s timeout. This is acceptable for SA/PLI updates (which repeat) but not for chat messages.
 - **No CoT deduplication**: If both peers auto-connect simultaneously, two links may form (one inbound, one outbound). CoT could be delivered twice. ATAK handles this gracefully via UID-based dedup, but it wastes bandwidth.
 - **Single TAK server port**: Fixed at 8087, not configurable at runtime.
-- **buildPython path**: Hardcoded Windows path in `app/build.gradle` — needs per-platform configuration or environment variable.
+- **buildPython auto-detection**: Requires a Python 3.13 command to be available to Chaquopy on the build machine.
 - **No TLS on TAK TCP**: The local ATAK↔Bridge TCP connection is plaintext. Acceptable for localhost/LAN but should be documented.
 - **Peer reconnection**: If a link closes, the peer is not automatically reconnected until a new announce is received. A periodic reconnect timer would improve resilience.
 - **RNS ↔ ATAK CoT delivery not yet functional**: Peers discover each other and establish links, but CoT messages from ATAK are not yet appearing on remote ATAK clients. Root cause under investigation — likely related to fragmentation/reassembly, link state timing, or callback delivery.

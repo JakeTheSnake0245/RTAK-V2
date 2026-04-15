@@ -23,6 +23,24 @@
             app:defaultValue="true" />
 
         <SwitchPreferenceCompat
+            app:key="ifac_enabled"
+            app:title="Enable Global IFAC"
+            app:summary="Apply the same IFAC settings to all Reticulum interfaces"
+            app:defaultValue="false" />
+
+        <EditTextPreference
+            app:key="ifac_netname"
+            app:title="Global IFAC NetName"
+            app:summary="Shared IFAC network name for all interfaces"
+            app:defaultValue="" />
+
+        <EditTextPreference
+            app:key="ifac_netkey"
+            app:title="Global IFAC NetKey"
+            app:summary="Shared IFAC network key for all interfaces"
+            app:defaultValue="" />
+
+        <SwitchPreferenceCompat
             app:key="rns_auto_announce"
             app:title="Auto-announce"
             app:summary="Periodically announce this node on the network"

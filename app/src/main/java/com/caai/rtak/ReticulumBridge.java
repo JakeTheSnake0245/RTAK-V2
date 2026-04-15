@@ -10,6 +10,7 @@ import com.chaquo.python.Python;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import com.caai.rtak.AppSettings;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -205,9 +206,15 @@ public class ReticulumBridge {
      */
     public boolean generateRnsConfig(Context context, String detectedInterfacesJson) {
         try {
-            File configDir = new File(context.getFilesDir(), "reticulum");
-            File configFile = new File(configDir, "config");
-            File registryFile = new File(configDir, "rtak_interfaces.json");
+             boolean rnsTransport = AppSettings.getRnsTransport(context);
+             boolean debugVerbose = AppSettings.getDebugVerbose(context);
+
+             boolean ifacEnabled = AppSettings.getIfacEnabled(context);
+             String globalIfacNetName = AppSettings.getIfacNetName(context);
+             String globalIfacNetKey = AppSettings.getIfacNetKey(context);
+             File configDir = new File(context.getFilesDir(), "reticulum");
+             File configFile = new File(configDir, "config");
+             File registryFile = new File(configDir, "rtak_interfaces.json");
 
             // 1. Parse optional detected-interfaces map  (name → resolved device path)
             JSONObject detected = null;
@@ -223,10 +230,15 @@ public class ReticulumBridge {
             }
 
             // 3. Fixed [reticulum] and [logging] sections (regenerated each boot)
-            String reticulumSection = "[reticulum]\n  enable_transport = True\n  share_instance   = No\n"
-                    + "  shared_instance_port = 37428\n  instance_control_port = 37429\n"
-                    + "  panic_on_interface_error = No\n";
-            String loggingSection = "[logging]\n  loglevel = 4\n";
+            String reticulumSection = "[reticulum]\n"
+                 + "  enable_transport = " + (rnsTransport ? "True" : "False") + "\n"
+                 + "  share_instance   = No\n"
+                 + "  shared_instance_port = 37428\n"
+                 + "  instance_control_port = 37429\n"
+                 + "  panic_on_interface_error = No\n";
+
+            String loggingSection = "[logging]\n"
+                + "  loglevel = " + (debugVerbose ? "7" : "4") + "\n";
 
             // 4. Build [interfaces] section
             StringBuilder interfaces = new StringBuilder("[interfaces]\n");
@@ -244,7 +256,15 @@ public class ReticulumBridge {
                 // Deep-copy config so USB port injection doesn't mutate the original
                 JSONObject entryConfig = entry.optJSONObject("config");
                 JSONObject config = new JSONObject(entryConfig != null ? entryConfig.toString() : "{}");
-
+                if (ifacEnabled) {
+                    if (!globalIfacNetName.isEmpty()) {
+                        config.put("ifac_netname", globalIfacNetName);
+                    }
+                    if (!globalIfacNetKey.isEmpty()) {
+                        config.put("ifac_netkey", globalIfacNetKey);
+                    }
+                }
+                
                 // For USB interfaces, inject the resolved device path
                 JSONObject ident = entry.optJSONObject("identifier");
                 if (ident != null && "usb".equals(ident.optString("method")) && detected != null) {
@@ -263,7 +283,14 @@ public class ReticulumBridge {
                 Iterator<String> keys = config.keys();
                 while (keys.hasNext()) {
                     String key = keys.next();
-                    interfaces.append("    ").append(key).append(" = ").append(config.get(key)).append("\n");
+                    Object value = config.get(key);
+                    String rendered;
+                    if (value instanceof Number || value instanceof Boolean) {
+                        rendered = String.valueOf(value);
+                    } else {
+                        rendered = "\"" + String.valueOf(value).replace("\"", "\\\"") + "\"";
+                    }
+                    interfaces.append("    ").append(key).append(" = ").append(rendered).append("\n");
                 }
                 interfaces.append("\n");
                 ifaceCount++;

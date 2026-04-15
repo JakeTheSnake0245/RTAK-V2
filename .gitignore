@@ -1,3 +1,13 @@
-.gradle
-.idea
-app/build
+.gradle/
+.idea/
+local.properties
+*.iml
+
+app/build/
+build/
+
+*.apk
+*.aab
+
+gradle-*.zip
+gradle85.zip
