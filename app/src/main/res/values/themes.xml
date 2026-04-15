@@ -13,6 +13,10 @@
         <item name="colorOnSecondary">@color/rtak_text_primary</item>
         <item name="colorOnSurface">@color/rtak_text_primary</item>
         <item name="colorOnBackground">@color/rtak_text_primary</item>
+        <item name="colorControlActivated">@color/rtak_red_accent</item>
+        <item name="colorControlHighlight">@color/rtak_red_primary</item>
+        <item name="android:colorAccent">@color/rtak_red_accent</item>
+        <item name="android:colorControlHighlight">@color/rtak_red_primary</item>
         <item name="android:colorBackground">@color/rtak_bg</item>
         <item name="android:textColorPrimary">@color/rtak_text_primary</item>
         <item name="android:textColorSecondary">@color/rtak_text_secondary</item>
