@@ -251,7 +251,6 @@ public class ReticulumBridge {
                 if (interfaceTypeMap.containsKey(itype))
                     itype = interfaceTypeMap.get(itype);
                 if (name.isEmpty() || itype == null || itype.isEmpty()) continue;
-                if (detected != null && !detected.has(name)) continue;
 
                 // Deep-copy config so USB port injection doesn't mutate the original
                 JSONObject entryConfig = entry.optJSONObject("config");
@@ -264,17 +263,36 @@ public class ReticulumBridge {
                         config.put("ifac_netkey", globalIfacNetKey);
                     }
                 }
-                
-                // For USB interfaces, inject the resolved device path
+
                 JSONObject ident = entry.optJSONObject("identifier");
-                if (ident != null && "usb".equals(ident.optString("method")) && detected != null) {
-                    String resolvedPath = detected.isNull(name) ? null : detected.optString(name, null);
-                    if (resolvedPath != null && !resolvedPath.isEmpty()) {
-                        config.put("port", resolvedPath);
-                    } else if (!config.has("port")) {
-                        Log.w(TAG, "Skipping '" + name + "': USB device not detected");
+                String identMethod = ident != null ? ident.optString("method", "") : "";
+
+                if ("usb".equals(identMethod)) {
+                    // USB: device path is resolved at boot from the USB bus topology.
+                    if (detected != null && !detected.has(name)) continue; // not physically present
+                    if (detected != null && detected.has(name)) {
+                        String resolvedPath = detected.isNull(name) ? null : detected.optString(name, null);
+                        if (resolvedPath != null && !resolvedPath.isEmpty()) {
+                            config.put("port", resolvedPath);
+                        } else if (!config.has("port")) {
+                            Log.w(TAG, "Skipping '" + name + "': USB device not detected");
+                            continue;
+                        }
+                    }
+                } else if ("bluetooth".equals(identMethod)) {
+                    // Bluetooth: RNS uses allow_bluetooth + target_device_address, not port.
+                    // Always included so RNS can auto-reconnect even if device is out of range.
+                    String btAddress = ident != null ? ident.optString("address", "") : "";
+                    if (btAddress.isEmpty()) {
+                        Log.w(TAG, "Skipping '" + name + "': no Bluetooth address in identifier");
                         continue;
                     }
+                    config.put("allow_bluetooth", true);
+                    config.put("target_device_address", btAddress);
+                    config.remove("port");
+                } else {
+                    // "network_device" / "always" — skip if filter active and not in detected map
+                    if (detected != null && !detected.has(name)) continue;
                 }
 
                 interfaces.append("  [[").append(name).append("]]\n");

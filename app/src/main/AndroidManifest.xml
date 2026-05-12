@@ -23,6 +23,21 @@
     <!-- USB Host (for RNode / serial interfaces). Not required — app works without it. -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
+    <!-- Bluetooth (legacy — API < 31) -->
+    <uses-permission android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+
+    <!-- Bluetooth (API 31+): CONNECT to pair/probe, SCAN with neverForLocation so
+         no location permission is required for RNode discovery -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <!-- Bluetooth hardware feature — not required so the app installs on non-BT devices -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+
     <application
         android:name=".RTAKApplication"
         android:allowBackup="true"

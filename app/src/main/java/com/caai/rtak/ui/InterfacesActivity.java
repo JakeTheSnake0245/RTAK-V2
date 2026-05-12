@@ -1,11 +1,17 @@
 package com.caai.rtak.ui;
 
+import android.Manifest;
 import android.app.PendingIntent;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 import android.hardware.usb.UsbManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.text.InputType;
@@ -21,6 +27,8 @@ import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -35,6 +43,7 @@ import com.hoho.android.usbserial.driver.ProbeTable;
 import com.hoho.android.usbserial.driver.UsbSerialDriver;
 import com.hoho.android.usbserial.driver.UsbSerialProber;
 import com.caai.rtak.R;
+import com.caai.rtak.rnode.BluetoothRNodeScanner;
 import com.caai.rtak.rnode.RNodeIdentifier;
 import com.caai.rtak.service.InterfaceDetector;
 import com.caai.rtak.service.TakBridgeService;
@@ -60,6 +69,21 @@ public class InterfacesActivity extends AppCompatActivity {
 
     private static final String TAG = "InterfacesActivity";
     private static final String ACTION_USB_PERMISSION = "com.caai.rtak.USB_PERMISSION_INTERFACES";
+
+    // BT permission launcher — resumes a pending Scan BT request once granted
+    private EditText   pendingBtPortField;
+    private String[]   pendingBtAddressHolder;
+    private final ActivityResultLauncher<String> btPermissionLauncher =
+            registerForActivityResult(new ActivityResultContracts.RequestPermission(), granted -> {
+                if (granted && pendingBtPortField != null) {
+                    showBluetoothDevicePicker(pendingBtPortField, pendingBtAddressHolder);
+                } else if (!granted) {
+                    Toast.makeText(this, "Bluetooth permission required to scan for devices",
+                            Toast.LENGTH_LONG).show();
+                }
+                pendingBtPortField = null;
+                pendingBtAddressHolder = null;
+            });
 
     private RecyclerView rvInterfaces;
     private FloatingActionButton fabAdd;
@@ -196,8 +220,9 @@ public class InterfacesActivity extends AppCompatActivity {
             }
             if (di.identifier != null) {
                 item.identifierMethod = di.identifier.optString("method", "always");
-                item.vid = di.identifier.optInt("vid", 0);
-                item.pid = di.identifier.optInt("pid", 0);
+                item.vid       = di.identifier.optInt("vid", 0);
+                item.pid       = di.identifier.optInt("pid", 0);
+                item.btAddress = di.identifier.optString("address", "");
             }
             items.add(item);
         }
@@ -298,8 +323,10 @@ public class InterfacesActivity extends AppCompatActivity {
         form.setOrientation(LinearLayout.VERTICAL);
         form.setPadding(48, 16, 48, 0);
 
-        List<String> fieldKeys = new ArrayList<>();
+        List<String> fieldKeys  = new ArrayList<>();
         List<EditText> fieldViews = new ArrayList<>();
+        // Captures the BT MAC if user scanned via Bluetooth; null means USB or manual entry.
+        final String[] btAddressHolder = {null};
 
         switch (type) {
             case "UDP Interface":
@@ -320,7 +347,7 @@ public class InterfacesActivity extends AppCompatActivity {
                 addField(form, fieldKeys, fieldViews, "device",      "Bind to network device (optional)", "");
                 break;
             case "RNode Interface":
-                addRNodePortField(form, fieldKeys, fieldViews, "");
+                addRNodePortField(form, fieldKeys, fieldViews, "", btAddressHolder);
                 addField(form, fieldKeys, fieldViews, "frequency",      "Frequency (Hz)",  "915000000", InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "bandwidth",      "Bandwidth (Hz)",  "125000",    InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "txpower",        "TX Power (dBm)",  "7",         InputType.TYPE_CLASS_NUMBER);
@@ -329,7 +356,7 @@ public class InterfacesActivity extends AppCompatActivity {
                 break;
             case "Serial Interface":
                 addSerialPortField(form, fieldKeys, fieldViews, "");
-                addField(form, fieldKeys, fieldViews, "speed", "Baud Rate",   "115200");
+                addField(form, fieldKeys, fieldViews, "speed", "Baud Rate", "115200");
                 break;
             case "KISS Interface":
                 addField(form, fieldKeys, fieldViews, "port",  "Serial Port", "");
@@ -342,33 +369,37 @@ public class InterfacesActivity extends AppCompatActivity {
                 .setView(form)
                 .setPositiveButton("Add", (d, w) -> {
                     try {
-                        // Build the config sub-object
                         JSONObject config = new JSONObject();
-                        String device = ""; // for identifier
+                        String device = "";
                         for (int i = 0; i < fieldKeys.size(); i++) {
                             String key = fieldKeys.get(i);
                             String val = fieldViews.get(i).getText().toString().trim();
                             if (!val.isEmpty()) {
                                 if ("device".equals(key)) {
-                                    device = val; // handled separately in identifier
+                                    device = val;
                                 } else {
                                     config.put(key, val);
                                 }
                             }
                         }
 
-                        // Build identifier
                         JSONObject identifier = new JSONObject();
-                        boolean b = type.equals("RNode Interface") || type.equals("Serial Interface")
+                        boolean isSerial = type.equals("RNode Interface")
+                                || type.equals("Serial Interface")
                                 || type.equals("KISS Interface");
-                        if (b) {
-                            // For USB devices — scan current USB bus for VID/PID
+
+                        if ("RNode Interface".equals(type) && btAddressHolder[0] != null) {
+                            // Bluetooth RNode: identifier stores the MAC; port not in config
+                            identifier.put("method", "bluetooth");
+                            identifier.put("address", btAddressHolder[0]);
+                            config.remove("port");
+                        } else if (isSerial) {
+                            // USB serial: try to capture VID/PID for hot-plug detection
                             int[] vidPid = detectUsbVidPid();
                             if (vidPid[0] != 0 && vidPid[1] != 0) {
                                 identifier.put("method", "usb");
                                 identifier.put("vid", vidPid[0]);
                                 identifier.put("pid", vidPid[1]);
-                                // Don't store port in config (resolved at detection time)
                                 config.remove("port");
                             } else {
                                 identifier.put("method", "always");
@@ -380,11 +411,9 @@ public class InterfacesActivity extends AppCompatActivity {
                             identifier.put("method", "always");
                         }
 
-                        // Check for serial port conflicts before saving
-                        if (b) {
-                            String identMethod = identifier.optString("method", "always");
+                        if (isSerial) {
                             String conflict = findConflictingSerialPort(
-                                    identMethod,
+                                    identifier.optString("method", "always"),
                                     identifier.optInt("vid", 0),
                                     identifier.optInt("pid", 0),
                                     config.optString("port", ""),
@@ -397,7 +426,6 @@ public class InterfacesActivity extends AppCompatActivity {
                             }
                         }
 
-                        // Build the full registry entry
                         JSONObject entry = new JSONObject();
                         entry.put("name", name);
                         entry.put("type", type);
@@ -407,7 +435,7 @@ public class InterfacesActivity extends AppCompatActivity {
 
                         if (boundService != null) {
                             boundService.addInterface(entry.toString());
-                            Toast.makeText(this, "Adding " + name + "...",
+                            Toast.makeText(this, "Adding " + name + "…",
                                     Toast.LENGTH_SHORT).show();
                         }
                     } catch (Exception e) {
@@ -490,15 +518,19 @@ public class InterfacesActivity extends AppCompatActivity {
     }
 
     /**
-     * Adds the "Port / BLE name" row for RNodeInterface, including a "Scan USB" button
-     * that enumerates connected USB serial devices and auto-fills the port path.
+     * Adds the "Port / BLE address" row for RNodeInterface.
+     * "Scan USB" probes connected USB serial devices; "Scan BT" shows paired
+     * Bluetooth devices and probes the selected one.
+     *
+     * @param btAddressHolder 1-element array; set to the Bluetooth MAC if the
+     *                        user picks a BT device (used to build the identifier).
      */
     private void addRNodePortField(LinearLayout parent, List<String> keys, List<EditText> views,
-                                    String defaultPort) {
+                                    String defaultPort, String[] btAddressHolder) {
         int dpTopMargin = (int) (8 * getResources().getDisplayMetrics().density);
 
         TextView tv = new TextView(this);
-        tv.setText("Port / BLE name");
+        tv.setText("Port / BT address");
         tv.setTextSize(12f);
         tv.setAlpha(0.7f);
         LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
@@ -511,7 +543,7 @@ public class InterfacesActivity extends AppCompatActivity {
         row.setOrientation(LinearLayout.HORIZONTAL);
 
         EditText et = new EditText(this);
-        et.setHint("/dev/bus/usb/... or BLE name");
+        et.setHint("/dev/bus/usb/... or BT MAC");
         et.setText(defaultPort);
         et.setInputType(InputType.TYPE_CLASS_TEXT);
         LinearLayout.LayoutParams etLp = new LinearLayout.LayoutParams(
@@ -519,10 +551,18 @@ public class InterfacesActivity extends AppCompatActivity {
         et.setLayoutParams(etLp);
         row.addView(et);
 
-        Button scanBtn = new Button(this);
-        scanBtn.setText("Scan USB");
-        scanBtn.setOnClickListener(v -> scanForRNodes(et, scanBtn));
-        row.addView(scanBtn);
+        Button scanUsbBtn = new Button(this);
+        scanUsbBtn.setText("USB");
+        scanUsbBtn.setOnClickListener(v -> {
+            btAddressHolder[0] = null; // user switched to USB
+            scanForRNodes(et, scanUsbBtn);
+        });
+        row.addView(scanUsbBtn);
+
+        Button scanBtBtn = new Button(this);
+        scanBtBtn.setText("BT");
+        scanBtBtn.setOnClickListener(v -> scanForBluetoothRNodes(et, btAddressHolder));
+        row.addView(scanBtBtn);
 
         parent.addView(row);
         keys.add("port");
@@ -590,6 +630,89 @@ public class InterfacesActivity extends AppCompatActivity {
                         .show();
             });
         });
+    }
+
+    /**
+     * Entry point for the "Scan BT" button.  Checks BLUETOOTH_CONNECT permission
+     * (API 31+) first; if not granted, requests it and stores the pending state so
+     * the launcher callback can resume.
+     */
+    private void scanForBluetoothRNodes(EditText portField, String[] btAddressHolder) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                    != PackageManager.PERMISSION_GRANTED) {
+                pendingBtPortField = portField;
+                pendingBtAddressHolder = btAddressHolder;
+                btPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT);
+                return;
+            }
+        }
+        showBluetoothDevicePicker(portField, btAddressHolder);
+    }
+
+    /**
+     * Shows a dialog listing all currently paired Bluetooth devices.
+     * When the user selects one, the port field is filled with the MAC address,
+     * btAddressHolder[0] is set, and the device is probed in the background to
+     * confirm RNode firmware.
+     */
+    private void showBluetoothDevicePicker(EditText portField, String[] btAddressHolder) {
+        BluetoothManager bm = (BluetoothManager) getSystemService(Context.BLUETOOTH_SERVICE);
+        BluetoothAdapter adapter = bm != null ? bm.getAdapter() : null;
+
+        if (adapter == null || !adapter.isEnabled()) {
+            Toast.makeText(this, "Bluetooth is not enabled", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        java.util.Set<BluetoothDevice> bonded;
+        try {
+            bonded = adapter.getBondedDevices();
+        } catch (SecurityException e) {
+            Toast.makeText(this, "Bluetooth permission denied", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (bonded.isEmpty()) {
+            Toast.makeText(this,
+                    "No paired Bluetooth devices found.\nPair your RNode in Android Settings first.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        java.util.List<BluetoothDevice> devices = new ArrayList<>(bonded);
+        String[] labels = new String[devices.size()];
+        for (int i = 0; i < devices.size(); i++) {
+            BluetoothDevice d = devices.get(i);
+            String name;
+            try { name = d.getName(); } catch (SecurityException e) { name = null; }
+            labels[i] = (name != null ? name : "Unknown") + "\n" + d.getAddress();
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Select Bluetooth RNode")
+                .setItems(labels, (dialog, which) -> {
+                    BluetoothDevice selected = devices.get(which);
+                    String address = selected.getAddress();
+                    portField.setText(address);
+                    btAddressHolder[0] = address;
+
+                    String deviceName;
+                    try { deviceName = selected.getName(); }
+                    catch (SecurityException e) { deviceName = null; }
+                    String label = deviceName != null ? deviceName : address;
+
+                    Toast.makeText(this, "Verifying " + label + "…", Toast.LENGTH_SHORT).show();
+                    bgExecutor.submit(() -> {
+                        boolean ok = new BluetoothRNodeScanner().probeDevice(this, selected);
+                        runOnUiThread(() -> Toast.makeText(this,
+                                ok ? label + " — RNode confirmed ✓"
+                                   : label + " selected (could not verify RNode firmware)",
+                                Toast.LENGTH_LONG).show());
+                    });
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     /**
@@ -751,12 +874,18 @@ public class InterfacesActivity extends AppCompatActivity {
         form.addView(switchEnabled);
 
         // Type-specific editable fields
-        List<String> fieldKeys = new ArrayList<>();
+        List<String> fieldKeys  = new ArrayList<>();
         List<EditText> fieldViews = new ArrayList<>();
+        // Pre-seed from existing BT address so the field isn't blank when editing
+        final String[] btAddressHolder = {"bluetooth".equals(item.identifierMethod)
+                ? item.btAddress : null};
 
         switch (item.type) {
             case "RNode Interface":
-                addRNodePortField(form, fieldKeys, fieldViews, item.port);
+                // For BT interfaces, show the MAC in the port field for reference
+                String portDefault = "bluetooth".equals(item.identifierMethod)
+                        ? item.btAddress : item.port;
+                addRNodePortField(form, fieldKeys, fieldViews, portDefault, btAddressHolder);
                 addField(form, fieldKeys, fieldViews, "frequency",
                         "Frequency (Hz)", String.valueOf(item.frequency), InputType.TYPE_CLASS_NUMBER);
                 addField(form, fieldKeys, fieldViews, "bandwidth",
@@ -828,14 +957,17 @@ public class InterfacesActivity extends AppCompatActivity {
                             entry.put("enabled", wantEnabled);
                             entry.put("config", config);
 
-                            // Build identifier — for serial types, a manually entered port
-                            // overrides the existing identifier (switches to "always" method).
                             boolean isSerial = item.type.equals("RNode Interface")
                                     || item.type.equals("Serial Interface")
                                     || item.type.equals("KISS Interface");
                             JSONObject identifier = new JSONObject();
-                            if (isSerial && config.has("port")) {
-                                // User supplied a port path — use plain "always" identifier
+                            if ("RNode Interface".equals(item.type) && btAddressHolder[0] != null) {
+                                // Bluetooth: store MAC in identifier, not in config port
+                                identifier.put("method", "bluetooth");
+                                identifier.put("address", btAddressHolder[0]);
+                                config.remove("port");
+                            } else if (isSerial && config.has("port")) {
+                                // Manual port path supplied — revert to "always" identifier
                                 identifier.put("method", "always");
                             } else if (item.identifierMethod != null) {
                                 identifier.put("method", item.identifierMethod);
@@ -900,6 +1032,7 @@ public class InterfacesActivity extends AppCompatActivity {
         long rxBytes, txBytes;
         int vid, pid;
         String identifierMethod;
+        String btAddress = ""; // Bluetooth MAC, set when identifierMethod == "bluetooth"
         // Config fields
         String port;
         long frequency, bandwidth;

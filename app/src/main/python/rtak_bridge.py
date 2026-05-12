@@ -1114,19 +1114,34 @@ def generate_rns_config(config_dir, detected_interfaces_json=None):
             if not name or not itype:
                 continue
 
-            # If we have a detected map, only include detected interfaces
-            if detected is not None and name not in detected:
-                continue
-
-            # For USB interfaces, inject the resolved device path
             ident = entry.get("identifier", {})
-            if ident.get("method") == "usb" and detected and name in detected:
-                resolved_path = detected[name]
-                if resolved_path:
-                    config["port"] = resolved_path
-                elif "port" not in config:
-                    # USB device not detected / no path available — skip
-                    _log(f"Skipping '{name}': USB device not detected", "WARN")
+            ident_method = ident.get("method", "always") if ident else "always"
+
+            if ident_method == "usb":
+                # Skip if detected map provided but this interface not present
+                if detected is not None and name not in detected:
+                    continue
+                # Inject resolved device path when available
+                if detected and name in detected:
+                    resolved_path = detected[name]
+                    if resolved_path:
+                        config["port"] = resolved_path
+                    elif "port" not in config:
+                        _log(f"Skipping '{name}': USB device not detected", "WARN")
+                        continue
+            elif ident_method == "bluetooth":
+                # BT interfaces bypass the detected map — RNS handles reconnection internally.
+                # Inject allow_bluetooth + target_device_address; never set port.
+                bt_address = ident.get("address", "") if ident else ""
+                if not bt_address:
+                    _log(f"Skipping '{name}': no Bluetooth address configured", "WARN")
+                    continue
+                config["allow_bluetooth"] = True
+                config["target_device_address"] = bt_address
+                config.pop("port", None)
+            else:
+                # Non-USB, non-BT: skip if not in detected map
+                if detected is not None and name not in detected:
                     continue
 
             interfaces_lines.append(f"  [[{name}]]")
@@ -1154,9 +1169,7 @@ def generate_rns_config(config_dir, detected_interfaces_json=None):
         with open(config_file, "w") as f:
             f.write(config_content)
 
-        iface_count = sum(1 for e in registry
-                          if e.get("enabled", True)
-                          and (detected is None or e.get("name") in detected))
+        iface_count = sum(1 for e in registry if e.get("enabled", True))
         _log(f"Generated RNS config with {iface_count} interface(s)")
         return True
 

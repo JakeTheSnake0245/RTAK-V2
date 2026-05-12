@@ -1,11 +1,19 @@
 package com.caai.rtak.service;
 
+import android.Manifest;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbManager;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
+
+import androidx.core.content.ContextCompat;
 
 import androidx.lifecycle.MutableLiveData;
 
@@ -148,6 +156,9 @@ public class InterfaceDetector {
                         case "network_device":
                             di.detected = checkNetworkDevice(di.identifier);
                             break;
+                        case "bluetooth":
+                            di.detected = checkBluetooth(di.identifier, di);
+                            break;
                         case "always":
                         default:
                             di.detected = true;
@@ -198,5 +209,43 @@ public class InterfaceDetector {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    /**
+     * Check if a paired Bluetooth device matching the stored MAC address is present.
+     * If found, sets {@code di.resolvedDevicePath} to the MAC address so that
+     * {@link #buildDetectedMap()} can pass it to {@code generate_rns_config()} as the port.
+     */
+    private boolean checkBluetooth(JSONObject identifier, DetectedInterface di) {
+        String address = identifier.optString("address", "");
+        if (address.isEmpty()) return false;
+
+        // BLUETOOTH_CONNECT permission required on API 31+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            if (ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
+                    != PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "checkBluetooth: BLUETOOTH_CONNECT not granted");
+                return false;
+            }
+        }
+
+        try {
+            BluetoothManager bm = (BluetoothManager)
+                    context.getSystemService(Context.BLUETOOTH_SERVICE);
+            BluetoothAdapter adapter = bm != null ? bm.getAdapter() : null;
+            if (adapter == null || !adapter.isEnabled()) return false;
+
+            for (BluetoothDevice device : adapter.getBondedDevices()) {
+                if (address.equalsIgnoreCase(device.getAddress())) {
+                    di.resolvedDevicePath = device.getAddress(); // MAC is the RNS port
+                    return true;
+                }
+            }
+        } catch (SecurityException e) {
+            Log.w(TAG, "checkBluetooth: permission denied — " + e.getMessage());
+        } catch (Exception e) {
+            Log.w(TAG, "checkBluetooth: " + e.getMessage());
+        }
+        return false;
     }
 }
